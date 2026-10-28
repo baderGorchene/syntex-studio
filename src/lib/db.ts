@@ -66,6 +66,11 @@ function getBetterSqlite3() {
 }
 
 function getDbPath(): string {
+  // Desktop builds keep the database in a per-user data directory.
+  if (process.env.SYNTHEX_DATA_DIR) {
+    fs.mkdirSync(process.env.SYNTHEX_DATA_DIR, { recursive: true });
+    return path.join(process.env.SYNTHEX_DATA_DIR, 'canvas.db');
+  }
   // On Vercel / AWS Lambda, the app root is read-only (EROFS).
   // /tmp is the only writable directory available to serverless functions.
   if (process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME) {

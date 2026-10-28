@@ -76,14 +76,20 @@ export async function POST(request: Request) {
 
     if (!isServerless) {
       try {
-        // Local disk storage for non-serverless local development (public/uploads/{projectId})
-        const uploadsDir = path.join(process.cwd(), 'public', 'uploads', projectId);
+        // Local disk storage for non-serverless local development (public/uploads/{projectId}),
+        // or SYNTHEX_UPLOAD_DIR/{projectId} for desktop builds (served by /api/local-files)
+        const customDir = process.env.SYNTHEX_UPLOAD_DIR;
+        const uploadsDir = customDir
+          ? path.join(customDir, projectId)
+          : path.join(process.cwd(), 'public', 'uploads', projectId);
         await fs.mkdir(uploadsDir, { recursive: true });
 
         const targetFilePath = path.join(uploadsDir, fileName);
         await fs.writeFile(targetFilePath, buffer);
 
-        const relativeUrl = `/uploads/${projectId}/${fileName}`;
+        const relativeUrl = customDir
+          ? `/api/local-files/${projectId}/${fileName}`
+          : `/uploads/${projectId}/${fileName}`;
 
         return NextResponse.json({
           url: relativeUrl,
