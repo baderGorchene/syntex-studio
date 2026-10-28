@@ -50,7 +50,7 @@ export function createCloudClient(account: Pick<SyncAccount, 'token' | 'cloudUrl
     async listProjects() {
       const { status, body } = await call('/api/device/projects');
       // The route always exists; it answers 404 to a token the cloud doesn't know (revoked), so that reads as a 401.
-      if (status === 401 || status === 404) throw new CloudError('The cloud no longer accepts this desktop.', 401);
+      if (status === 401 || (status === 404 && body.error === 'Not found.')) throw new CloudError('The cloud no longer accepts this desktop.', 401);
       const account = isObject(body.account) ? body.account : {};
       if (status !== 200 || typeof body.userId !== 'string' || !body.userId || !Array.isArray(body.projects)) {
         throw unexpected('the map list', status);

@@ -400,6 +400,7 @@ export default function SynthexWorkspace() {
   const applyRemoteGraph = useCallback((next: KnowledgeGraph, changed: RemoteChange) => {
     rebaseHistory(next, changed);
     remoteGraphRef.current = next;
+    graphRef.current = next; // a flush awaiting this merge must save the merged graph, not the pre-merge render's
     setGraph(next);
   }, [rebaseHistory]);
 
@@ -651,12 +652,13 @@ export default function SynthexWorkspace() {
   }, [announce, loadProjects]);
 
   /** Opens a map from the dropdown or the maps manager, a personal one included while in a team. */
-  const openMap = useCallback(async (id: string) => {
-    if (!await leaveMap(id)) return;
+  const openMap = useCallback(async (id: string): Promise<boolean> => {
+    if (!await leaveMap(id)) return false;
     setProjectId(id);
     if (typeof window !== 'undefined') localStorage.setItem('synthex_active_project_id', id);
     setProjectMenuOpen(false);
     setMapsManagerOpen(false);
+    return true;
   }, [leaveMap]);
   const closeMapsManager = useCallback(() => setMapsManagerOpen(false), []);
   const skipBrief = useCallback(() => setBriefFor(null), []);
@@ -1285,8 +1287,9 @@ export default function SynthexWorkspace() {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ projectId: id })
       }));
       setPersonalProjects(current => [...current, data.project]);
-      await openMap(data.project.id);
-      announce('Offline copy made. Open the desktop app to sync it.');
+      announce(await openMap(data.project.id)
+        ? 'Offline copy made. Open the desktop app to sync it.'
+        : 'Offline copy made. It opens once this map is saved.');
     } catch (error) { announce(error instanceof Error ? error.message : 'Could not make an offline copy.'); }
   }
 
@@ -1299,9 +1302,11 @@ export default function SynthexWorkspace() {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ title: projectTitleDraft })
       }));
-      setProjects(current => [...current, data.project]);
       setProjectTitleDraft(''); setProjectMenuOpen(false); setMapsManagerOpen(false);
-      if (!await leaveMap(data.project.id)) return; // created and listed; it opens once the open map is saved
+      // List it only after the flush: a projects change re-runs the load effect, which would abort the save.
+      const left = await leaveMap(data.project.id);
+      setProjects(current => [...current, data.project]);
+      if (!left) return; // created and listed; it opens once the open map is saved
       setProjectId(data.project.id);
       setBriefFor({ id: data.project.id, title: data.project.title });
       if (typeof window !== 'undefined') {
@@ -2659,13 +2664,9 @@ export default function SynthexWorkspace() {
             hasSelectedPlan: true
           }));
           if (project) {
-            setProjects(prev => {
-              if (!prev.some(p => p.id === project.id)) {
-                return [project as ResearchProject, ...prev];
-              }
-              return prev;
-            });
             void leaveMap(project.id).then(ok => {
+              // Listed after the flush, so the load effect can't abort the open map's save.
+              setProjects(prev => prev.some(p => p.id === project.id) ? prev : [project as ResearchProject, ...prev]);
               if (!ok) return;
               setProjectId(project.id);
               if (typeof window !== 'undefined') {
