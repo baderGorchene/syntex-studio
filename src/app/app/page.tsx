@@ -370,6 +370,11 @@ export default function SynthexWorkspace() {
     setConflictPanelOpen(true);
     return true;
   }, [announce]);
+  // The graph object last known to match the server; any other graph on screen is unsaved work.
+  const [savedGraph, setSavedGraph] = useState<KnowledgeGraph | null>(null);
+  const savedGraphRef = useRef(savedGraph);
+  savedGraphRef.current = savedGraph;
+  const markSaved = useCallback((saved: KnowledgeGraph) => { savedGraphRef.current = saved; setSavedGraph(saved); }, []);
   const markSynced = useCallback((data: GraphResponse) => {
     graphVersionRef.current = data.version;
     lastSyncedGraphRef.current = { title: projectTitleRef.current, nodes: data.nodes, relationships: data.relationships };
@@ -397,6 +402,123 @@ export default function SynthexWorkspace() {
     remoteGraphRef.current = next;
     setGraph(next);
   }, [rebaseHistory]);
+
+  // A save hit 409: someone saved this map since we loaded it. Three-way merge with the cloud copy, show it as a
+  // remote update (no undo entry, no history snapshot), then autosave runs again on the new version.
+  const mergeWithCloud = useCallback(async (): Promise<boolean> => {
+    if (++mergeRetries.current > MAX_MERGE_RETRIES) {
+      setSaveState('error');
+      announce('Changes not saved: this map keeps changing elsewhere. Your next edit will try again.');
+      return false;
+    }
+    const requestId = loadRequest.current;
+    const cloud = await readJson<GraphResponse>(await fetch(`/api/graph?projectId=${encodeURIComponent(projectIdRef.current)}`, { cache: 'no-store' }));
+    if (requestId !== loadRequest.current) return true; // another map was opened meanwhile
+    const title = projectTitleRef.current;
+    const local = graphRef.current; // includes edits made while the save and this fetch were in flight
+    const remote = { title, nodes: cloud.nodes, relationships: cloud.relationships };
+    const base = { ...(lastSyncedGraphRef.current ?? remote), title };
+    const { merged, conflicts: found, dropped } = mergeGraphs(base, toSnapshot(local, title), remote);
+    markSynced(cloud);
+    const next = normalizeGraph(merged.nodes, merged.relationships);
+    const differs = (a: unknown, b: unknown) => JSON.stringify(a) !== JSON.stringify(b);
+    const changed: RemoteChange = {
+      nodes: new Set([...Object.keys(local.nodesById), ...Object.keys(next.nodesById)].filter(id => differs(local.nodesById[id], next.nodesById[id]))),
+      edges: new Set([...Object.keys(local.edgesById), ...Object.keys(next.edgesById)].filter(id => differs(local.edgesById[id], next.edgesById[id])))
+    };
+    applyRemoteGraph(next, changed);
+    if (found.length) { conflictsRef.current = found; setConflicts(found); setConflictPanelOpen(true); }
+    if (dropped.length) announce(`${plural(dropped.length, 'link')} removed: a note it joined was deleted elsewhere.`);
+    return true;
+  }, [announce, applyRemoteGraph, markSynced]);
+
+  // One PUT at a time, so each carries the version the previous one returned. A save asked for meanwhile is queued
+  // and runs once, with the latest map, after a successful save. After a 409 the merge itself triggers the next save.
+  // The returned promise settles when the whole run is done: false if it ended in the error state.
+  const saveInFlight = useRef(false);
+  const saveQueued = useRef(false);
+  const saveRun = useRef<Promise<boolean>>(Promise.resolve(true));
+  const saveNow = useCallback((): Promise<boolean> => {
+    if (saveInFlight.current) { saveQueued.current = true; return saveRun.current; }
+    saveInFlight.current = true;
+    saveRun.current = (async () => { try {
+      do {
+        saveQueued.current = false;
+        const requestId = loadRequest.current;
+        const id = projectIdRef.current;
+        const saving = graphRef.current;
+        const fromTeammate = saving === remoteGraphRef.current;
+        const nodes = Object.values(saving.nodesById);
+        const relationships = Object.values(saving.edgesById);
+        const response = await fetch('/api/graph', {
+          method: 'PUT', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ projectId: id, baseVersion: graphVersionRef.current, nodes, relationships })
+        });
+        // Another map was opened meanwhile. Never while flushSave runs: every switch waits for it.
+        if (requestId !== loadRequest.current || id !== projectIdRef.current) return true;
+        if (response.status === 409) return await mergeWithCloud();
+        const { version } = await readJson<{ version: number }>(response);
+        markSynced({ version, nodes, relationships });
+        markSaved(saving);
+        mergeRetries.current = 0;
+        if (!saveQueued.current) setSaveState('saved');
+        const now = Date.now();
+        if (!fromTeammate && now - lastRevisionTime.current > 120_000) {
+          lastRevisionTime.current = now;
+          fetch('/api/revisions', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              projectId: id,
+              action: 'create',
+              title: `Auto-saved snapshot (${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })})`,
+              nodes,
+              relationships
+            })
+          }).catch(() => { });
+        }
+      } while (saveQueued.current);
+      return true;
+    } catch (error) {
+      setSaveState('error');
+      announce(error instanceof Error ? error.message : 'Changes could not be saved.');
+      return false;
+    } finally {
+      saveInFlight.current = false;
+      saveQueued.current = false;
+    } })();
+    return saveRun.current;
+  }, [announce, mergeWithCloud, markSynced, markSaved]);
+
+  // The debounced autosave's timer, so a switch can run that save now instead of dropping it.
+  const saveTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const saveReadyRef = useRef(false);
+  saveReadyRef.current = Boolean(loadedProject) && loadedProject === projectId && !loading;
+  /**
+   * Saves the open map now, a queued save and any 409 merge included, and waits for it. True when nothing is left
+   * unsaved; false when it ended with conflicts or in the error state.
+   */
+  const flushSave = useCallback(async (): Promise<boolean> => {
+    for (let pass = 0; pass <= MAX_MERGE_RETRIES + 1; pass++) {
+      clearTimeout(saveTimer.current);
+      saveTimer.current = undefined;
+      if (conflictsRef.current.length || !saveReadyRef.current) break;
+      let ok;
+      if (saveInFlight.current) ok = await saveRun.current;
+      else if (graphRef.current !== savedGraphRef.current) ok = await saveNow();
+      else { setSaveState('saved'); return true; }
+      if (!ok) return false;
+    }
+    return !conflictsRef.current.length && (!saveReadyRef.current || graphRef.current === savedGraphRef.current);
+  }, [saveNow]);
+  /** Every switch away from (or removal of) the open map waits for its save. The map stays open if that fails. */
+  const leaveMap = useCallback(async (nextId?: string) => {
+    if (nextId !== undefined && nextId === projectIdRef.current) return true;
+    if (conflictsBlockSwitch(nextId)) return false;
+    if (await flushSave()) return true;
+    if (!conflictsBlockSwitch(nextId)) announce('This map could not be saved yet, so it stays open. Try again in a moment.');
+    return false;
+  }, [conflictsBlockSwitch, flushSave, announce]);
 
   const restoreRevision = useCallback(async (revisionId: string) => {
     if (refuseReadOnly()) return;
@@ -463,25 +585,36 @@ export default function SynthexWorkspace() {
       if (requestId !== loadRequest.current) return;
       markSynced(graphBody);
       mergeRetries.current = 0;
-      setGraph(normalizeGraph(adoptLegacyClusterMembers(graphBody.nodes), graphBody.relationships));
+      const loaded = normalizeGraph(adoptLegacyClusterMembers(graphBody.nodes), graphBody.relationships);
+      setGraph(loaded);
+      markSaved(loaded);
       setCanvasFitKey(value => value + 1);
       setSessions(historyBody.sessions);
       setLoadedProject(id);
     } catch (error) {
       if (requestId !== loadRequest.current) return;
       announce(error instanceof Error ? error.message : 'Could not load this workspace.');
-      setGraph(blankGraph());
+      const blank = blankGraph();
+      setGraph(blank);
+      markSaved(blank); // nothing loaded, so nothing unsaved
       setSessions([]);
     } finally {
       if (requestId === loadRequest.current) setLoading(false);
     }
-  }, [announce, markSynced]);
+  }, [announce, markSynced, markSaved]);
 
   const loadProjects = useCallback(async () => {
     try {
       const data = await readJson<{ projects: ResearchProject[]; personalProjects?: ResearchProject[]; workspace?: { kind: 'personal' | 'team' } }>(
         await fetch('/api/projects', { cache: 'no-store' })
       );
+      // A new list can reload or replace the open map, so save it first (unless it is gone: nothing to save it to).
+      // Undecided conflicts already stop both: the reload in loadProject and, below, a switch.
+      const listed = [...data.projects, ...(data.personalProjects || [])];
+      if (listed.some(p => p.id === projectIdRef.current) && !conflictsRef.current.length && !await flushSave()) {
+        if (!conflictsRef.current.length) announce('This map could not be saved yet. Try again in a moment.');
+        return;
+      }
       setProjects(data.projects);
       setPersonalProjects(data.personalProjects || []);
       setWorkspaceKind(data.workspace?.kind === 'team' ? 'team' : 'personal');
@@ -489,9 +622,10 @@ export default function SynthexWorkspace() {
         // Keep the open map if it belongs to this workspace (or is one of your personal maps opened from a team),
         // otherwise open the workspace's first map.
         const stored = typeof window !== 'undefined' ? localStorage.getItem('synthex_active_project_id') : null;
-        const matching = [...data.projects, ...(data.personalProjects || [])].find(p => p.id === stored);
+        const matching = listed.find(p => p.id === stored);
         const nextId = matching ? matching.id : data.projects[0].id;
-        if (conflictsBlockSwitch(nextId)) return;
+        // A map that is gone (just deleted or removed) has nowhere to save to: only undecided conflicts hold it.
+        if (listed.some(p => p.id === projectIdRef.current) ? !await leaveMap(nextId) : conflictsBlockSwitch(nextId)) return;
         setProjectId(nextId);
         if (typeof window !== 'undefined') {
           localStorage.setItem('synthex_active_project_id', nextId);
@@ -500,7 +634,7 @@ export default function SynthexWorkspace() {
     } catch (error) {
       announce(error instanceof Error ? error.message : 'Could not load projects.');
     }
-  }, [announce, conflictsBlockSwitch]);
+  }, [announce, conflictsBlockSwitch, flushSave, leaveMap]);
 
   const moveProject = useCallback(async (id: string, workspace: 'team' | 'personal') => {
     try {
@@ -517,13 +651,13 @@ export default function SynthexWorkspace() {
   }, [announce, loadProjects]);
 
   /** Opens a map from the dropdown or the maps manager, a personal one included while in a team. */
-  const openMap = useCallback((id: string) => {
-    if (conflictsBlockSwitch(id)) return;
+  const openMap = useCallback(async (id: string) => {
+    if (!await leaveMap(id)) return;
     setProjectId(id);
     if (typeof window !== 'undefined') localStorage.setItem('synthex_active_project_id', id);
     setProjectMenuOpen(false);
     setMapsManagerOpen(false);
-  }, [conflictsBlockSwitch]);
+  }, [leaveMap]);
   const closeMapsManager = useCallback(() => setMapsManagerOpen(false), []);
   const skipBrief = useCallback(() => setBriefFor(null), []);
   const saveBrief = useCallback((brief: MapBrief) => {
@@ -550,7 +684,7 @@ export default function SynthexWorkspace() {
   }, [announce]);
 
   const deleteProject = useCallback(async (id: string) => {
-    if (id === projectIdRef.current && conflictsBlockSwitch()) return false; // deleting the open map opens another
+    if (id === projectIdRef.current && !await leaveMap()) return false; // deleting the open map opens another
     try {
       if (sync.enabled) {
         const title = [...projects, ...personalProjects].find(p => p.id === id)?.title || 'Untitled map';
@@ -570,17 +704,17 @@ export default function SynthexWorkspace() {
       announce(error instanceof Error ? error.message : 'Could not delete that map.');
       return false;
     }
-  }, [announce, loadProjects, conflictsBlockSwitch, sync, projects, personalProjects]);
+  }, [announce, loadProjects, leaveMap, sync, projects, personalProjects]);
 
   // Desktop: drop the local copy (the cloud keeps it); the open map gives way to another, as after a delete.
   const removeFromDevice = useCallback(async (id: string, title: string) => {
-    if (id === projectIdRef.current && conflictsBlockSwitch()) return;
+    if (id === projectIdRef.current && !await leaveMap()) return;
     if (!await sync.destroy('remove-from-device', id, title)) return;
     removeMapBrief(id);
     if (localStorage.getItem('synthex_active_project_id') === id) localStorage.removeItem('synthex_active_project_id');
     await loadProjects();
     announce('Map removed from this device.');
-  }, [sync, conflictsBlockSwitch, loadProjects, announce]);
+  }, [sync, leaveMap, loadProjects, announce]);
 
   useEffect(() => {
     let cancelled = false;
@@ -685,84 +819,6 @@ export default function SynthexWorkspace() {
     announce(`Jumped to ${peer.user.name}.`);
   }, [announce]);
 
-  // A save hit 409: someone saved this map since we loaded it. Three-way merge with the cloud copy, show it as a
-  // remote update (no undo entry, no history snapshot), then autosave runs again on the new version.
-  const mergeWithCloud = useCallback(async () => {
-    if (++mergeRetries.current > MAX_MERGE_RETRIES) {
-      setSaveState('error');
-      announce('Changes not saved: this map keeps changing elsewhere. Your next edit will try again.');
-      return;
-    }
-    const requestId = loadRequest.current;
-    const cloud = await readJson<GraphResponse>(await fetch(`/api/graph?projectId=${encodeURIComponent(projectIdRef.current)}`, { cache: 'no-store' }));
-    if (requestId !== loadRequest.current) return; // another map was opened meanwhile
-    const title = projectTitleRef.current;
-    const local = graphRef.current; // includes edits made while the save and this fetch were in flight
-    const remote = { title, nodes: cloud.nodes, relationships: cloud.relationships };
-    const base = { ...(lastSyncedGraphRef.current ?? remote), title };
-    const { merged, conflicts: found, dropped } = mergeGraphs(base, toSnapshot(local, title), remote);
-    markSynced(cloud);
-    const next = normalizeGraph(merged.nodes, merged.relationships);
-    const differs = (a: unknown, b: unknown) => JSON.stringify(a) !== JSON.stringify(b);
-    const changed: RemoteChange = {
-      nodes: new Set([...Object.keys(local.nodesById), ...Object.keys(next.nodesById)].filter(id => differs(local.nodesById[id], next.nodesById[id]))),
-      edges: new Set([...Object.keys(local.edgesById), ...Object.keys(next.edgesById)].filter(id => differs(local.edgesById[id], next.edgesById[id])))
-    };
-    applyRemoteGraph(next, changed);
-    if (found.length) { setConflicts(found); setConflictPanelOpen(true); }
-    if (dropped.length) announce(`${plural(dropped.length, 'link')} removed: a note it joined was deleted elsewhere.`);
-  }, [announce, applyRemoteGraph, markSynced]);
-
-  // One PUT at a time, so each carries the version the previous one returned. A save asked for meanwhile is queued
-  // and runs once, with the latest map, after a successful save. After a 409 the merge itself triggers the next save.
-  const saveInFlight = useRef(false);
-  const saveQueued = useRef(false);
-  const saveNow = useCallback(async () => {
-    if (saveInFlight.current) { saveQueued.current = true; return; }
-    saveInFlight.current = true;
-    try {
-      do {
-        saveQueued.current = false;
-        const requestId = loadRequest.current;
-        const id = projectIdRef.current;
-        const saving = graphRef.current;
-        const fromTeammate = saving === remoteGraphRef.current;
-        const nodes = Object.values(saving.nodesById);
-        const relationships = Object.values(saving.edgesById);
-        const response = await fetch('/api/graph', {
-          method: 'PUT', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ projectId: id, baseVersion: graphVersionRef.current, nodes, relationships })
-        });
-        if (requestId !== loadRequest.current || id !== projectIdRef.current) return; // another map was opened meanwhile
-        if (response.status === 409) { await mergeWithCloud(); return; }
-        const { version } = await readJson<{ version: number }>(response);
-        markSynced({ version, nodes, relationships });
-        mergeRetries.current = 0;
-        if (!saveQueued.current) setSaveState('saved');
-        const now = Date.now();
-        if (!fromTeammate && now - lastRevisionTime.current > 120_000) {
-          lastRevisionTime.current = now;
-          fetch('/api/revisions', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              projectId: id,
-              action: 'create',
-              title: `Auto-saved snapshot (${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })})`,
-              nodes,
-              relationships
-            })
-          }).catch(() => { });
-        }
-      } while (saveQueued.current);
-    } catch (error) {
-      setSaveState('error');
-      announce(error instanceof Error ? error.message : 'Changes could not be saved.');
-    } finally {
-      saveInFlight.current = false;
-      saveQueued.current = false;
-    }
-  }, [announce, mergeWithCloud, markSynced]);
 
   const paused = conflicts.length > 0;
   useEffect(() => {
@@ -772,7 +828,8 @@ export default function SynthexWorkspace() {
     const fromTeammate = graph === remoteGraphRef.current;
     if (!fromTeammate) mergeRetries.current = 0; // a fresh edit of ours gets a fresh set of merge attempts
     setSaveState('saving');
-    const timer = setTimeout(() => { void saveNow(); }, fromTeammate ? 1500 + Math.round(Math.random() * 1000) : 450);
+    const timer = setTimeout(() => { saveTimer.current = undefined; void saveNow(); }, fromTeammate ? 1500 + Math.round(Math.random() * 1000) : 450);
+    saveTimer.current = timer;
     return () => clearTimeout(timer);
   }, [graph, projectId, loadedProject, loading, paused, saveNow]);
 
@@ -780,8 +837,9 @@ export default function SynthexWorkspace() {
   const { scheduleSync } = sync;
   useEffect(() => { if (saveState === 'saved') scheduleSync(); }, [saveState, scheduleSync]);
 
-  // Leaving the page now would lose work: undecided conflicts pause saving, and a save may be queued or in flight.
-  const unsaved = paused || saveState !== 'saved';
+  // Leaving the page now would lose work: undecided conflicts pause saving, or the map on screen isn't saved yet.
+  // Off after a failed load (nothing loaded) and once a save catches up, whatever the save label says.
+  const unsaved = paused || (Boolean(loadedProject) && loadedProject === projectId && graph !== savedGraph);
   useEffect(() => {
     if (!unsaved) return;
     const warn = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = ''; };
@@ -1177,8 +1235,9 @@ export default function SynthexWorkspace() {
       });
     }
     setGraph(next);
+    markSaved(next);
     if (!onlyIfChanged) setCanvasFitKey(value => value + 1);
-  }, [projectId, markSynced, rebaseHistory]);
+  }, [projectId, markSynced, markSaved, rebaseHistory]);
 
   // R15: a sync pass changed the open map's lastSyncedAt, so it may have written cloud edits locally: reload, unless
   // web conflicts are undecided or a save is pending (that save then 409s and merges as usual).
@@ -1204,12 +1263,15 @@ export default function SynthexWorkspace() {
     const id = syncConflictsFor;
     if (!id) return;
     const kind = sync.rows.find(r => r.projectId === id)?.conflicts.find(c => c.id === conflictId)?.kind;
+    // The server resolves against the saved map, so edits on screen go first.
+    if (id === projectIdRef.current && !await flushSave()) { announce('This map could not be saved yet. Try again in a moment.'); return; }
     const result = await sync.act({ action: 'resolve', projectId: id, conflictId, choice });
     if (!result) return;
     if (!result.rows?.find(r => r.projectId === id)?.conflicts.length) setSyncConflictsFor(null);
     if (kind === 'project' || id !== projectIdRef.current) { await loadProjects(); return; } // the map may be gone, or back
-    await reloadGraph().catch(() => announce('Could not reload this map.'));
-  }, [syncConflictsFor, sync, loadProjects, reloadGraph, announce]);
+    // The background-reload path: undo is rebased onto the result, and an edit made meanwhile wins (and merges on save).
+    await reloadGraph(true).catch(() => announce('Could not reload this map.'));
+  }, [syncConflictsFor, sync, loadProjects, reloadGraph, flushSave, announce]);
 
   const reloadHistory = useCallback(async () => {
     const data = await readJson<{ sessions: ResearchSession[] }>(await fetch(`/api/research?projectId=${encodeURIComponent(projectId)}`, { cache: 'no-store' }));
@@ -1223,7 +1285,7 @@ export default function SynthexWorkspace() {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ projectId: id })
       }));
       setPersonalProjects(current => [...current, data.project]);
-      openMap(data.project.id);
+      await openMap(data.project.id);
       announce('Offline copy made. Open the desktop app to sync it.');
     } catch (error) { announce(error instanceof Error ? error.message : 'Could not make an offline copy.'); }
   }
@@ -1238,7 +1300,9 @@ export default function SynthexWorkspace() {
         body: JSON.stringify({ title: projectTitleDraft })
       }));
       setProjects(current => [...current, data.project]);
-      setProjectTitleDraft(''); setProjectMenuOpen(false); setMapsManagerOpen(false); setProjectId(data.project.id);
+      setProjectTitleDraft(''); setProjectMenuOpen(false); setMapsManagerOpen(false);
+      if (!await leaveMap(data.project.id)) return; // created and listed; it opens once the open map is saved
+      setProjectId(data.project.id);
       setBriefFor({ id: data.project.id, title: data.project.title });
       if (typeof window !== 'undefined') {
         localStorage.setItem('synthex_active_project_id', data.project.id);
@@ -2601,12 +2665,13 @@ export default function SynthexWorkspace() {
               }
               return prev;
             });
-            if (!conflictsBlockSwitch(project.id)) {
+            void leaveMap(project.id).then(ok => {
+              if (!ok) return;
               setProjectId(project.id);
               if (typeof window !== 'undefined') {
                 localStorage.setItem('synthex_active_project_id', project.id);
               }
-            }
+            });
           }
         }}
       />
