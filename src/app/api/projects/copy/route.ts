@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
-import { bulkSaveCanvasToDb, createProjectInDb, getAllConnectionsFromDb, getAllNodesFromDb, getProjectTitle, userHasProjectAccess } from '@/lib/db';
+import { indexGraphNodes } from '@/lib/ai-service';
+import { bulkSaveCanvasToDb, createProjectInDb, deleteProjectFromDb, getAllConnectionsFromDb, getAllNodesFromDb, getProjectTitle, userHasProjectAccess } from '@/lib/db';
 import { getServerAuth } from '@/lib/auth';
 import { normalizeGraph } from '@/lib/graph';
 import { copyGraphWithNewIds } from '@/lib/sync/copy';
@@ -25,12 +26,21 @@ export async function POST(request: Request) {
     }
 
     const graph = normalizeGraph((await getAllNodesFromDb(projectId)) as CanvasNode[], (await getAllConnectionsFromDb(projectId)) as Connection[]);
-    const title = (await getProjectTitle(projectId)) || 'Untitled map';
+    const title = ((await getProjectTitle(projectId)) || '').trim() || 'Untitled map';
     const copy = copyGraphWithNewIds({ title, nodes: Object.values(graph.nodesById), relationships: Object.values(graph.edgesById) }, randomUUID);
 
     // Personal: owned by the user, no organization.
     const project = await createProjectInDb(`project-${randomUUID()}`, `${title.slice(0, 80 - SUFFIX.length)}${SUFFIX}`, userId, null);
-    await bulkSaveCanvasToDb(copy.nodes, copy.relationships, project.id);
+    try {
+      const saved = await bulkSaveCanvasToDb(copy.nodes, copy.relationships, project.id);
+      if (!saved.saved) throw new Error('Save of the copy was refused.');
+    } catch (error) {
+      // Never leave an empty half-made copy behind.
+      console.error('Failed to save offline copy:', error);
+      await Promise.resolve(deleteProjectFromDb(project.id, userId, auth.clerkId)).catch(e => console.error('Failed to clean up offline copy:', e));
+      return Response.json({ error: 'Could not make an offline copy.' }, { status: 500 });
+    }
+    try { indexGraphNodes(project.id, copy.nodes); } catch (error) { console.warn('Could not index the offline copy:', error); }
     return Response.json({ project }, { status: 201 });
   } catch (error) {
     console.error('Failed to copy project:', error);
