@@ -31,10 +31,9 @@ if (!app.requestSingleInstanceLock()) {
     handleDeepLink(url);
   });
   app.on('window-all-closed', () => app.quit());
-  app.on('before-quit', () => {
-    quitting = true;
-    if (child) child.kill();
-  });
+  app.on('before-quit', () => { quitting = true; });
+  // will-quit runs only once nothing cancelled the quit, so a window that chose "Stay" keeps its server.
+  app.on('will-quit', () => { if (child) child.kill(); });
   process.on('exit', () => child && child.kill());
   handleDeepLink(process.argv.find((a) => a.startsWith('synthex://'))); // Windows passes the URL in argv on first launch
   app.whenReady().then(start).catch((err) => fatal(`Synthex Studio could not start.\n\n${err.message}`));
@@ -115,6 +114,16 @@ async function start() {
   };
   win.webContents.on('will-navigate', stayOnOrigin);
   win.webContents.on('will-redirect', stayOnOrigin);
+  // A page that cancels beforeunload (unsaved work) would silently block the close: ask instead.
+  // preventDefault here means "leave anyway".
+  win.webContents.on('will-prevent-unload', (event) => {
+    const choice = dialog.showMessageBoxSync(win, {
+      type: 'warning', buttons: ['Stay', 'Leave anyway'], defaultId: 0, cancelId: 0,
+      message: 'Some changes are not saved yet.', detail: 'If you leave now, they may be lost.',
+    });
+    if (choice === 1) event.preventDefault();
+    else quitting = false; // the quit was cancelled, so a later server exit is unexpected again
+  });
   win.on('closed', () => { win = null; });
   // A link that launched the app is posted before the page loads, so its first sync status already shows it.
   if (pendingToken) {
