@@ -3,7 +3,7 @@
  * Integrates Clerk for production SaaS and provides zero-config offline fallback.
  */
 
-import { getUserByClerkId, getUserById, getUserIdForDeviceToken, upsertUser, type UserRecord } from './db.ts';
+import { getUserByClerkId, getUserById, getUserIdForDeviceToken, projectExistsInDb, upsertUser, type UserRecord } from './db.ts';
 
 export interface AuthContext {
   userId: string;
@@ -99,4 +99,12 @@ export async function getServerAuth(): Promise<AuthContext> {
     isLocal: false,
     user: userRecord
   };
+}
+
+
+/** Device callers learn why a map is out of reach: 403 it exists but isn't theirs (or is a team map), 410 no such map. */
+export async function deviceProjectDenied(projectId: string): Promise<Response> {
+  return (await projectExistsInDb(projectId))
+    ? Response.json({ error: 'This map is not available to this desktop.' }, { status: 403 })
+    : Response.json({ error: 'This map no longer exists.' }, { status: 410 });
 }

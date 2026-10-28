@@ -11,8 +11,8 @@ const isPublicRoute = createRouteMatcher([
 
 // Desktop sync calls these server-to-server with `Authorization: Bearer sxd_…`; the routes authenticate the
 // device token themselves through getServerAuth(). Minting/revoking tokens (/api/device/tokens) always needs Clerk.
-const DEVICE_ROUTES = /^\/api\/(graph|upload|device\/.+)$/;
-const DEVICE_TOKEN_ADMIN = /^\/api\/device\/tokens(\/|$)/i;
+// Device routes must pass `auth.isDevice` as `personalOnly` to userHasProjectAccess.
+const DEVICE_ROUTES = /^\/api\/(graph|upload|device\/projects(\/[^/]+)?)$/;
 function isDeviceTokenRequest(request: NextRequest): boolean {
   if (!request.headers.get('authorization')?.startsWith('Bearer sxd_')) return false;
   let pathname: string;
@@ -21,7 +21,7 @@ function isDeviceTokenRequest(request: NextRequest): boolean {
   } catch {
     return false;
   }
-  return DEVICE_ROUTES.test(pathname) && !DEVICE_TOKEN_ADMIN.test(pathname) && !pathname.includes('..');
+  return DEVICE_ROUTES.test(pathname) && !pathname.includes('..');
 }
 
 // Live collaboration connects the browser to the sync server over WebSocket; allow only that origin.

@@ -1,6 +1,6 @@
 import { indexGraphNodes } from '@/lib/ai-service';
 import { bulkSaveCanvasToDb, getAllConnectionsFromDb, getAllNodesFromDb, getGraphVersion, userHasProjectAccess } from '@/lib/db';
-import { getServerAuth } from '@/lib/auth';
+import { deviceProjectDenied, getServerAuth } from '@/lib/auth';
 import { normalizeGraph } from '@/lib/graph';
 import type { CanvasNodeType, CanvasNode, Connection } from '@/types/canvas';
 
@@ -23,8 +23,9 @@ export async function GET(request: Request) {
     if (!auth.isLocal && !userId) return Response.json({ error: 'Unauthorized' }, { status: 401 });
 
     const projectId = requestedProject(request);
-    if (!projectId || !(await userHasProjectAccess(projectId, userId, orgId, clerkId, auth.isDevice))) {
-      return Response.json({ error: 'Project not found.' }, { status: 404 });
+    if (!projectId) return Response.json({ error: 'Project not found.' }, { status: 404 });
+    if (!(await userHasProjectAccess(projectId, userId, orgId, clerkId, auth.isDevice))) {
+      return auth.isDevice ? deviceProjectDenied(projectId) : Response.json({ error: 'Project not found.' }, { status: 404 });
     }
     // Version before data. Saves bump the version atomically with the write (SQLite and Neon transactions), so a save
     // landing between these reads can only pair newer data with an older version: the next PUT gets a 409 and merges again.
@@ -52,8 +53,9 @@ export async function PUT(request: Request) {
 
     const body = await request.json();
     const projectId = typeof body?.projectId === 'string' ? body.projectId : '';
-    if (!projectId || projectId.length > 80 || !(await userHasProjectAccess(projectId, userId, orgId, clerkId, auth.isDevice))) {
-      return Response.json({ error: 'Project not found or access denied.' }, { status: 404 });
+    if (!projectId || projectId.length > 80) return Response.json({ error: 'Project not found or access denied.' }, { status: 404 });
+    if (!(await userHasProjectAccess(projectId, userId, orgId, clerkId, auth.isDevice))) {
+      return auth.isDevice ? deviceProjectDenied(projectId) : Response.json({ error: 'Project not found or access denied.' }, { status: 404 });
     }
     if (!Array.isArray(body?.nodes) || !Array.isArray(body?.relationships)) {
       return Response.json({ error: 'Expected nodes and relationships.' }, { status: 400 });
