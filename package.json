@@ -8,7 +8,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "test": "node --experimental-strip-types --test tests/graph.test.mjs",
+    "test": "node --experimental-strip-types --test tests/graph.test.mjs tests/sync.test.mjs",
     "collab": "npm --prefix collab-server install --no-audit --no-fund && npm --prefix collab-server start"
   },
   "dependencies": {
