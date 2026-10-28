@@ -294,7 +294,7 @@ export function syncAll(store: typeof syncStore, cloud: CloudClient): Promise<Sy
 ```
 - **Algorithm** (spec §6), per project, under an in-process per-project lock (a `Map<string, Promise<SyncRow>>`, where a second caller awaits the first):
   1. Skip rows whose `accountId` differs from the connected account.
-  2. If `deletedLocally`, call `deleteProject` with `baseVersion`. On 200, delete the local row and project. On 409, set conflicts to `[{ id: 'project:' + id, kind: 'title', reason: 'deleted-local', ... }]` and status `conflicts`.
+  2. If `deletedLocally`, call `deleteProject` with `baseVersion`. On 200, delete the local row and project. On 409, set conflicts to `[{ id: 'project:' + id, kind: 'project', itemId: id, reason: 'deleted-local' }]` and status `conflicts`.
   3. If `baseVersion === null`, call `upsertProject`, then `putGraph(local, 0)`.
   4. Otherwise `getGraph`:
      - 403 → `readOnly`, status `no-access`.
