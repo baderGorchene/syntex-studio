@@ -1,5 +1,5 @@
 import { indexGraphNodes } from '@/lib/ai-service';
-import { bulkSaveCanvasToDb, getAllConnectionsFromDb, getAllNodesFromDb, getGraphVersion, userHasProjectAccess } from '@/lib/db';
+import { bulkSaveCanvasToDb, getAllConnectionsFromDb, getAllNodesFromDb, getGraphVersion, getProjectTitle, userHasProjectAccess } from '@/lib/db';
 import { deviceProjectDenied, getServerAuth } from '@/lib/auth';
 import { normalizeGraph } from '@/lib/graph';
 import type { CanvasNodeType, CanvasNode, Connection } from '@/types/canvas';
@@ -33,7 +33,8 @@ export async function GET(request: Request) {
     const rawNodes = (await getAllNodesFromDb(projectId)) as CanvasNode[];
     const rawEdges = (await getAllConnectionsFromDb(projectId)) as Connection[];
     const graph = normalizeGraph(rawNodes, rawEdges);
-    return Response.json({ nodes: Object.values(graph.nodesById), relationships: Object.values(graph.edgesById), version });
+    const title = await getProjectTitle(projectId);
+    return Response.json({ title, nodes: Object.values(graph.nodesById), relationships: Object.values(graph.edgesById), version });
   } catch (error) {
     console.error('Failed to load knowledge graph:', error);
     return Response.json({ error: 'Could not load the knowledge graph.' }, { status: 500 });

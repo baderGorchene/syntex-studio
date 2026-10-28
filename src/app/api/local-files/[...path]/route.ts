@@ -2,16 +2,7 @@ import { NextResponse } from 'next/server';
 import path from 'path';
 import fs from 'fs';
 import { Readable } from 'stream';
-
-const CONTENT_TYPES: Record<string, string> = {
-  '.png': 'image/png',
-  '.jpg': 'image/jpeg',
-  '.jpeg': 'image/jpeg',
-  '.gif': 'image/gif',
-  '.webp': 'image/webp',
-  '.svg': 'image/svg+xml',
-  '.pdf': 'application/pdf',
-};
+import { LOCAL_FILE_TYPES, resolveLocalFile } from '@/lib/local-files';
 
 // Serves files from SYNTHEX_UPLOAD_DIR in desktop builds only.
 export async function GET(
@@ -23,13 +14,9 @@ export async function GET(
   if (process.env.SYNTHEX_DESKTOP !== '1' || !root) return notFound();
 
   const { path: segments } = await context.params;
-  // Segments are already URL-decoded, so reject separators, drive letters and NULs inside them.
-  if (segments.some((s) => !s || s === '..' || /[\/:\0]/.test(s))) return notFound();
-
-  const base = path.resolve(root);
-  const target = path.resolve(base, ...segments);
-  const rel = path.relative(base, target);
-  if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) return notFound();
+  // Segments are already URL-decoded.
+  const target = resolveLocalFile(root, segments);
+  if (!target) return notFound();
 
   try {
     if (!(await fs.promises.stat(target)).isFile()) return notFound();
@@ -41,7 +28,7 @@ export async function GET(
   const stream = Readable.toWeb(fs.createReadStream(target)) as ReadableStream;
   return new Response(stream, {
     headers: {
-      'Content-Type': CONTENT_TYPES[path.extname(target).toLowerCase()] || 'application/octet-stream',
+      'Content-Type': LOCAL_FILE_TYPES[path.extname(target).toLowerCase()] || 'application/octet-stream',
       'X-Content-Type-Options': 'nosniff',
       'Content-Security-Policy': "sandbox; default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'",
     },

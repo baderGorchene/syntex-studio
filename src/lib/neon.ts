@@ -365,6 +365,13 @@ export async function neonProjectExists(id: string): Promise<boolean> {
   return rows.length > 0;
 }
 
+export async function neonGetProjectTitle(id: string): Promise<string | null> {
+  await ensureNeonSchema();
+  const sql = getSql();
+  const rows = await sql`SELECT title FROM projects WHERE id = ${id} LIMIT 1`;
+  return rows.length ? String(rows[0].title) : null;
+}
+
 export async function neonUserHasProjectAccess(
   id: string,
   userId?: string | null,

@@ -25,6 +25,7 @@ import {
   neonRenameProject,
   neonDeleteProject,
   neonProjectExists,
+  neonGetProjectTitle,
   neonUserHasProjectAccess,
   neonCreateProject,
   neonGetAllNodes,
@@ -838,6 +839,15 @@ export function projectExistsInDb(id: string): boolean | Promise<boolean> {
     return neonProjectExists(id);
   }
   return Boolean(getDatabase().prepare('SELECT 1 FROM projects WHERE id = ?').get(id));
+}
+
+/** A map's title, or null when there is no such map. The caller checks access first. */
+export function getProjectTitle(id: string): string | null | Promise<string | null> {
+  if (isNeonConfigured()) {
+    return neonGetProjectTitle(id);
+  }
+  const row = getDatabase().prepare('SELECT title FROM projects WHERE id = ?').get(id) as { title: string } | undefined;
+  return row?.title ?? null;
 }
 
 export function userHasProjectAccess(
