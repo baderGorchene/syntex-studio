@@ -35,7 +35,8 @@ export function applyResolution(merged: GraphSnapshot, conflict: GraphConflict, 
       relationships = relationships.filter(e => e.id !== id);
     }
   } else if (conflict.kind === 'node') {
-    const local = conflict.local as CanvasNode | undefined;
+    // Editing goes on while conflicts wait: "mine" is the note as it is now, the snapshot only if it is gone.
+    const local = nodes.find(n => n.id === id) ?? conflict.local as CanvasNode | undefined;
     const remote = conflict.remote as CanvasNode | undefined;
     if (choice === 'keep') {
       nodes = upsert(nodes, (local ?? remote)!);
@@ -51,7 +52,8 @@ export function applyResolution(merged: GraphSnapshot, conflict: GraphConflict, 
   } else {
     // Edge: mine/cloud on both-changed, keep on deleted-*. Left out while an endpoint is missing;
     // a kept endpoint node brings its links back through its own conflict's `edges`.
-    const edge = (choice === 'keep' ? conflict.local ?? conflict.remote : choice === 'mine' ? conflict.local : conflict.remote) as Connection;
+    const local = relationships.find(e => e.id === id) ?? conflict.local as Connection | undefined;
+    const edge = (choice === 'keep' ? local ?? conflict.remote : choice === 'mine' ? local : conflict.remote) as Connection;
     const nodeIds = new Set(nodes.map(n => n.id));
     relationships = relationships.filter(e => e.id !== id);
     if (nodeIds.has(edge.from) && nodeIds.has(edge.to)) relationships = [...relationships, edge];

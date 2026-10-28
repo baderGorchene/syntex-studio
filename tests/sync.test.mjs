@@ -194,6 +194,41 @@ test('resolve delete removes the node\'s links', () => {
   assert.deepEqual(touches(gone, 'a'), []);
 });
 
+// Editing goes on while conflicts wait, so a resolution must keep the item as it is now, not the merge-time snapshot.
+const editAfter = (g, id, content) => ({ ...g, nodes: g.nodes.map(n => n.id === id ? { ...n, content } : n) });
+
+test('resolve mine keeps edits made after the conflict', () => {
+  const base = graph([node('a', { content: 'base' }), node('b')], [edge('e', 'a', 'b')]);
+  const { merged, conflicts } = merge(base, graph([node('a', { content: 'local' }), node('b')], [edge('e', 'a', 'b')]),
+    graph([node('a', { content: 'remote' }), node('b')], [edge('e', 'a', 'b')]));
+  const current = editAfter(merged, 'a', 'later');
+  assert.equal(applyResolution(current, conflicts[0], 'mine', () => 'x').nodes.find(n => n.id === 'a').content, 'later');
+});
+
+test('resolve both keeps edits made after the conflict', () => {
+  const base = graph([node('a', { content: 'base' })]);
+  const { merged, conflicts } = merge(base, graph([node('a', { content: 'local' })]), graph([node('a', { content: 'remote' })]));
+  const both = applyResolution(editAfter(merged, 'a', 'later'), conflicts[0], 'both', () => 'copy1');
+  assert.equal(both.nodes.find(n => n.id === 'a').content, 'later');
+  assert.equal(both.nodes.find(n => n.id === 'copy1').content, 'remote');
+});
+
+test('resolve keep keeps edits made after the conflict', () => {
+  const base = graph([node('a')]);
+  const { merged, conflicts } = merge(base, graph([node('a', { content: 'local' })]), graph([]));
+  assert.equal(conflicts[0].reason, 'deleted-remote');
+  const kept = applyResolution(editAfter(merged, 'a', 'later'), conflicts[0], 'keep', () => 'x');
+  assert.equal(kept.nodes.find(n => n.id === 'a').content, 'later');
+});
+
+test('resolve mine on a link keeps the current link', () => {
+  const base = graph([node('a'), node('b')], [edge('e', 'a', 'b')]);
+  const { merged, conflicts } = merge(base, graph([node('a'), node('b')], [{ ...edge('e', 'a', 'b'), label: 'contradicts' }]),
+    graph([node('a'), node('b')], [{ ...edge('e', 'a', 'b'), label: 'refines' }]));
+  const current = { ...merged, relationships: merged.relationships.map(r => ({ ...r, label: 'later' })) };
+  assert.equal(applyResolution(current, conflicts[0], 'mine', () => 'x').relationships[0].label, 'later');
+});
+
 test('invalid choice throws', () => {
   const both = merge(graph([node('a', { content: 'b' })]), graph([node('a', { content: 'l' })]), graph([node('a', { content: 'r' })]));
   assert.throws(() => applyResolution(both.merged, both.conflicts[0], 'keep', () => 'x'));

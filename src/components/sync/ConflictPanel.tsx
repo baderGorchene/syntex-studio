@@ -47,6 +47,10 @@ export function ConflictPanel({ conflicts, onResolve, onClose, graph }: {
   const titleOf = (id: string) => graph?.nodes.find(node => node.id === id)?.title
     ?? conflicts.map(c => c.local ?? c.remote).find((side): side is CanvasNode => isNode(side) && side.id === id)?.title
     ?? 'a deleted note';
+  // "Keep mine" keeps the item as it is now (edits go on while conflicts wait), so show that one.
+  const currentOf = (conflict: GraphConflict): Side => (conflict.kind === 'node'
+    ? graph?.nodes.find(node => node.id === conflict.itemId)
+    : conflict.kind === 'edge' ? graph?.relationships.find(edge => edge.id === conflict.itemId) : undefined) ?? conflict.local;
   const linkText = (edge: Connection) => `${titleOf(edge.from)} ${(edge.label || 'relates to').replaceAll('_', ' ')} ${titleOf(edge.to)}`;
 
   const renderSide = (conflict: GraphConflict, side: Side, label: string) => {
@@ -82,7 +86,7 @@ export function ConflictPanel({ conflicts, onResolve, onClose, graph }: {
           return <article key={conflict.id} className="review-change conflict-item">
             <h3>{heading}</h3>
             {conflict.kind !== 'project' && <div className="conflict-sides">
-              {renderSide(conflict, conflict.local, 'Your version')}
+              {renderSide(conflict, currentOf(conflict), 'Your version')}
               {renderSide(conflict, conflict.remote, 'Cloud version')}
             </div>}
             <div className="conflict-actions" role="group" aria-label={heading}>
