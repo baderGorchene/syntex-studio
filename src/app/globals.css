@@ -1569,6 +1569,21 @@ kbd {
 @media (max-width: 560px) { .conflict-sides { grid-template-columns: 1fr; } }
 .topbar-conflicts { padding: 0; border: 0; background: transparent; color: #B42318; font: inherit; font-size: 12.5px; font-weight: 600; white-space: nowrap; cursor: pointer; text-decoration: underline; }
 .review-footer { justify-content: flex-end; }
+.sync-chip { display: inline-flex; align-items: center; gap: 8px; margin-left: 10px; color: var(--faint, #6b6b66); font-size: 12.5px; font-weight: 500; white-space: nowrap; }
+.sync-chip.is-sync-error, .sync-chip-detail { color: #B42318; }
+.sync-chip-detail { max-width: 220px; overflow: hidden; text-overflow: ellipsis; font-size: 11.5px; }
+.sync-chip .text-button { font-size: 12px; }
+.sync-banner { position: absolute; top: 12px; left: 50%; z-index: 30; display: flex; flex-wrap: wrap; align-items: center; gap: 10px 14px; max-width: calc(100% - 32px); padding: 10px 14px; transform: translateX(-50%); border: 1px solid #F1C4BF; border-radius: 10px; background: #FFF6F5; color: #7A1A10; font-size: 13.5px; font-weight: 560; }
+.sync-banner div { display: flex; gap: 8px; }
+.sync-dialog { gap: 14px; }
+.sync-dialog-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.sync-upload-list { display: grid; gap: 6px; max-height: 50dvh; margin: 0; padding: 0; overflow: auto; list-style: none; }
+.sync-upload-list label { display: flex; align-items: center; gap: 8px; font-size: 14px; }
+.sync-maps { display: grid; gap: 8px; padding: 10px 16px 0; }
+.sync-maps-account { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin: 0; font-size: 13px; }
+.sync-online-only { display: flex; align-items: center; gap: 8px; padding: 6px 0; }
+.sync-online-only .map-menu-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+@media (max-width: 760px) { .sync-chip-detail { display: none; } }
 .review-footer .quiet-button { margin-right: auto; }
 .toast-note {
   position: fixed;

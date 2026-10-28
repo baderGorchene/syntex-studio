@@ -22,7 +22,10 @@ const validId = (v: unknown): v is string => typeof v === 'string' && v.length >
 const validToken = (v: unknown): v is string => typeof v === 'string' && v.startsWith('sxd_') && v.length <= 200 && /^[\x21-\x7e]+$/.test(v);
 
 // R19: a verified token waits here (never on disk) until the user confirms, for at most 10 minutes.
-let pending: { token: string; userId: string; cloudUrl: string; timer: ReturnType<typeof setTimeout> } | null = null;
+let pending: {
+  token: string; userId: string; cloudUrl: string; account: { email: string | null; name: string | null };
+  timer: ReturnType<typeof setTimeout>;
+} | null = null;
 function clearPending() {
   if (pending) clearTimeout(pending.timer);
   pending = null;
@@ -88,6 +91,9 @@ export async function GET() {
     }
     return Response.json({
       account: account ? { userId: account.userId, cloudUrl: account.cloudUrl, ...profile } : null,
+      cloudUrl: cloudUrl() || null,
+      // A sign-in waiting for the user's yes (never the token).
+      pending: pending && pending.cloudUrl === cloudUrl() ? { account: pending.account } : null,
       online,
       rows: publicRows(),
       cloudProjects
@@ -123,7 +129,7 @@ export async function POST(request: Request) {
           return bad('Could not reach the cloud.', 502);
         }
         clearPending();
-        pending = { token: input.token, userId: list.userId, cloudUrl: url, timer: setTimeout(clearPending, PENDING_MS) };
+        pending = { token: input.token, userId: list.userId, cloudUrl: url, account: list.account, timer: setTimeout(clearPending, PENDING_MS) };
         pending.timer.unref?.();
         return Response.json({ account: list.account, userId: list.userId, localOnly: await localOnly() });
       }

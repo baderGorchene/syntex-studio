@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef, type ComponentProps } from 'react';
+import { useEffect, useRef, type ComponentProps, type ReactNode } from 'react';
 import { X } from 'lucide-react';
 import { MapMenu } from './MapMenu';
 
@@ -8,7 +8,7 @@ import { MapMenu } from './MapMenu';
  * Every map in one place, outside the topbar dropdown: find, sort, open, rename, move and delete maps,
  * and start a new one. The rows are the dropdown's (MapMenu), laid out as a page.
  */
-export function MapsManager({ onClose, ...menu }: Omit<ComponentProps<typeof MapMenu>, 'layout' | 'onManage'> & { onClose: () => void }) {
+export function MapsManager({ onClose, children, ...menu }: Omit<ComponentProps<typeof MapMenu>, 'layout' | 'onManage'> & { onClose: () => void; children?: ReactNode }) {
   const dialog = useRef<HTMLElement>(null);
   const total = menu.projects.length + menu.personalProjects.length;
 
@@ -36,6 +36,7 @@ export function MapsManager({ onClose, ...menu }: Omit<ComponentProps<typeof Map
           <h2 id="maps-manager-title">All maps <small>{total}</small></h2>
           <button type="button" className="icon-button" aria-label="Close" onClick={onClose}><X size={20} strokeWidth={1.75} /></button>
         </header>
+        {children}
         <div className="map-menu is-page">
           <MapMenu {...menu} layout="page" />
         </div>

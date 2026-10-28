@@ -5,6 +5,7 @@ import { applyResolution } from '../src/lib/sync/resolve.ts';
 import { syncAll, syncProject } from '../src/lib/sync/engine.ts';
 import { normalizeGraph } from '../src/lib/graph.ts';
 import { isAllowedDesktopRequest } from '../src/lib/desktop-host.ts';
+import { canRepair, isMapReadOnly, needsUnsyncedWarning, syncLabel } from '../src/lib/sync/ui.ts';
 
 const node = (id, extra = {}) => ({ id, type: 'note', x: 0, y: 0, title: id, createdAt: 1, ...extra });
 const edge = (id, from, to) => ({ id, from, to, label: 'supports' });
@@ -659,4 +660,28 @@ test('desktop host check allows loopback on our port only', () => {
   assert.equal(anyPort('localhost:4567', 'http://localhost:4567'), true);
   assert.equal(anyPort('localhost:4567', 'http://localhost:9999'), false);
   assert.equal(anyPort('evil.example:4567'), false);
+});
+
+test('desktop sync UI decisions', () => {
+  const row = (extra = {}) => ({ status: 'synced', offline: true, readOnly: false, error: null, ...extra });
+  assert.equal(syncLabel(row(), true, false), 'Offline');
+  assert.equal(syncLabel(row(), false, true), 'Syncing');
+  assert.equal(syncLabel(row({ status: 'pending' }), false, false), 'Syncing');
+  assert.equal(syncLabel(row({ status: 'conflicts' }), false, false), 'Conflicts');
+  assert.equal(syncLabel(row({ status: 'error' }), false, false), 'Sync error');
+  assert.equal(syncLabel(row(), false, false), 'Synced');
+
+  assert.equal(isMapReadOnly(null, true), false);
+  assert.equal(isMapReadOnly(row({ readOnly: true }), false), true);
+  assert.equal(isMapReadOnly(row({ offline: false }), true), true);
+  assert.equal(isMapReadOnly(row({ offline: false }), false), false);
+  assert.equal(isMapReadOnly(row(), true), false);
+
+  assert.equal(needsUnsyncedWarning(null), false);
+  assert.equal(needsUnsyncedWarning(row()), false);
+  for (const status of ['pending', 'conflicts', 'error']) assert.equal(needsUnsyncedWarning(row({ status })), true);
+
+  assert.equal(canRepair(row({ status: 'error', error: 'Stored sync data is damaged.' })), true);
+  assert.equal(canRepair(row({ status: 'error', error: 'Could not reach the cloud.' })), false);
+  assert.equal(canRepair(null), false);
 });

@@ -29,6 +29,10 @@ import { ToolComposer, type ComposerTool } from '@/components/research/ToolCompo
 import { MarkdownView, decodeEntities } from '@/components/research/MarkdownView';
 import { DocumentPane } from '@/components/research/DocumentPane';
 import { ConflictPanel } from '@/components/sync/ConflictPanel';
+import { useDesktopSync } from '@/components/sync/useDesktopSync';
+import { SyncStatusChip } from '@/components/sync/SyncStatusChip';
+import { ConnectDialog, DesktopMapsSection, ReadOnlyBanner, mapSyncActions, mapSyncBadge } from '@/components/sync/DesktopSyncPanels';
+import { isMapReadOnly } from '@/lib/sync/ui';
 import { mergeGraphs, type GraphConflict, type GraphSnapshot } from '@/lib/sync/merge';
 import { applyResolution, type ResolutionChoice } from '@/lib/sync/resolve';
 import { LiveResearchCard, type ResearchLiveProgress } from '@/components/research/LiveResearchCard';
@@ -170,6 +174,8 @@ export default function SynthexWorkspace() {
     hasSelectedPlan?: boolean;
   } | null>(null);
   const aiConfigured = Boolean(aiStatus?.configured);
+  // The desktop app has no AI (keys stay on the cloud server): its entry points are hidden.
+  const aiDesktop = Boolean(aiStatus?.desktop);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [viewport, setViewport] = useState<Viewport>({ zoom: 0.82, pan: { x: 76, y: 52 } });
   const viewportRef = useRef(viewport);
@@ -274,6 +280,16 @@ export default function SynthexWorkspace() {
     noticeTimer.current = setTimeout(() => setNotice(''), 3600);
   }, []);
 
+  // Desktop sync (inert on web, where /api/sync answers 404). A read-only map refuses every edit path below.
+  const sync = useDesktopSync(projectId || null, announce);
+  const readOnly = sync.enabled && isMapReadOnly(sync.row, sync.appOffline);
+  const readOnlyRef = useRef(readOnly);
+  readOnlyRef.current = readOnly;
+  const refuseReadOnly = useCallback(() => {
+    if (readOnlyRef.current) announce('This map is read-only right now.');
+    return readOnlyRef.current;
+  }, [announce]);
+
   const isResizeLocked = useStoredPref('synthex_resize_locked') === 'true';
 
   // Pen and marker drawings: saved per map in this browser only. They never touch the graph, the document or AI context.
@@ -296,6 +312,7 @@ export default function SynthexWorkspace() {
   }, [announce, isResizeLocked]);
 
   const updateGraph = useCallback((change: (current: KnowledgeGraph) => KnowledgeGraph, recordUndo = true) => {
+    if (refuseReadOnly()) return;
     let didRecord = false;
     setGraph(current => {
       try {
@@ -315,24 +332,26 @@ export default function SynthexWorkspace() {
       setUndoReady(true);
       setRedoReady(false);
     }
-  }, []);
+  }, [refuseReadOnly]);
 
   const undo = useCallback(() => {
+    if (refuseReadOnly()) return;
     const previous = undoStack.current.pop();
     if (!previous) return;
     redoStack.current.push(graphRef.current);
     setGraph(previous);
     setUndoReady(undoStack.current.length > 0);
     setRedoReady(true);
-  }, []);
+  }, [refuseReadOnly]);
   const redo = useCallback(() => {
+    if (refuseReadOnly()) return;
     const next = redoStack.current.pop();
     if (!next) return;
     undoStack.current.push(graphRef.current);
     setGraph(next);
     setUndoReady(true);
     setRedoReady(redoStack.current.length > 0);
-  }, []);
+  }, [refuseReadOnly]);
 
   const lastRevisionTime = useRef(Date.now());
   // Sync: the server version our edits are based on, and the map as it was then (the merge base on a 409).
@@ -376,6 +395,7 @@ export default function SynthexWorkspace() {
   }, []);
 
   const restoreRevision = useCallback(async (revisionId: string) => {
+    if (refuseReadOnly()) return;
     try {
       const res = await fetch('/api/revisions', {
         method: 'POST',
@@ -392,7 +412,7 @@ export default function SynthexWorkspace() {
     } catch (err) {
       announce(err instanceof Error ? err.message : 'Could not restore this revision.');
     }
-  }, [projectId, updateGraph, announce]);
+  }, [projectId, updateGraph, announce, refuseReadOnly]);
 
   const createCheckpoint = useCallback(async (customTitle?: string) => {
     try {
@@ -528,7 +548,12 @@ export default function SynthexWorkspace() {
   const deleteProject = useCallback(async (id: string) => {
     if (id === projectIdRef.current && conflictsBlockSwitch()) return false; // deleting the open map opens another
     try {
-      await readJson(await fetch(`/api/projects?projectId=${encodeURIComponent(id)}`, { method: 'DELETE' }));
+      if (sync.enabled) {
+        const title = [...projects, ...personalProjects].find(p => p.id === id)?.title || 'Untitled map';
+        if (!await sync.destroy('delete-local', id, title)) return false;
+      } else {
+        await readJson(await fetch(`/api/projects?projectId=${encodeURIComponent(id)}`, { method: 'DELETE' }));
+      }
       removeMapBrief(id);
       // Deleting the open map opens the workspace's first remaining map (or a fresh starter map).
       if (typeof window !== 'undefined' && localStorage.getItem('synthex_active_project_id') === id) {
@@ -541,7 +566,17 @@ export default function SynthexWorkspace() {
       announce(error instanceof Error ? error.message : 'Could not delete that map.');
       return false;
     }
-  }, [announce, loadProjects, conflictsBlockSwitch]);
+  }, [announce, loadProjects, conflictsBlockSwitch, sync, projects, personalProjects]);
+
+  // Desktop: drop the local copy (the cloud keeps it); the open map gives way to another, as after a delete.
+  const removeFromDevice = useCallback(async (id: string, title: string) => {
+    if (id === projectIdRef.current && conflictsBlockSwitch()) return;
+    if (!await sync.destroy('remove-from-device', id, title)) return;
+    removeMapBrief(id);
+    if (localStorage.getItem('synthex_active_project_id') === id) localStorage.removeItem('synthex_active_project_id');
+    await loadProjects();
+    announce('Map removed from this device.');
+  }, [sync, conflictsBlockSwitch, loadProjects, announce]);
 
   useEffect(() => {
     let cancelled = false;
@@ -736,6 +771,10 @@ export default function SynthexWorkspace() {
     const timer = setTimeout(() => { void saveNow(); }, fromTeammate ? 1500 + Math.round(Math.random() * 1000) : 450);
     return () => clearTimeout(timer);
   }, [graph, projectId, loadedProject, loading, paused, saveNow]);
+
+  // Desktop: a sync pass 5 s after the last autosave (debounced in the hook; a no-op on web).
+  const { scheduleSync } = sync;
+  useEffect(() => { if (saveState === 'saved') scheduleSync(); }, [saveState, scheduleSync]);
 
   // Leaving the page now would lose work: undecided conflicts pause saving, and a save may be queued or in flight.
   const unsaved = paused || saveState !== 'saved';
@@ -986,6 +1025,7 @@ export default function SynthexWorkspace() {
       const text = event.clipboardData?.getData('text')?.trim();
       if (text && (text.startsWith('http://') || text.startsWith('https://'))) {
         event.preventDefault();
+        if (refuseReadOnly()) return;
         const ytId = extractYouTubeVideoId(text);
         addRecord('source', {
           title: ytId ? 'YouTube video' : 'Web link',
@@ -1012,7 +1052,7 @@ export default function SynthexWorkspace() {
       window.removeEventListener('blur', onBlur);
       window.removeEventListener('paste', onPaste);
     };
-  }, [undo, redo, selectedIds, deleteSelected, addRecord, announce, editorId, draftIds]);
+  }, [undo, redo, selectedIds, deleteSelected, addRecord, announce, editorId, draftIds, refuseReadOnly]);
 
   // Moving only moves. Cluster membership changes when the user drops a note in or out (assignCluster).
   const moveNodes = useCallback((positions: Record<string, Coordinates>) => {
@@ -1117,12 +1157,46 @@ export default function SynthexWorkspace() {
     return nextGraph;
   }, false);
 
-  const reloadGraph = useCallback(async () => {
+  /** `onlyIfChanged`: a background refresh after a desktop sync pass. It keeps the view, and gives way to any edit made meanwhile. */
+  const reloadGraph = useCallback(async (onlyIfChanged = false) => {
+    const before = graphRef.current;
     const data = await readJson<GraphResponse>(await fetch(`/api/graph?projectId=${encodeURIComponent(projectId)}`, { cache: 'no-store' }));
+    if (onlyIfChanged && (projectId !== projectIdRef.current || graphRef.current !== before || data.version === graphVersionRef.current)) return;
     markSynced(data);
     setGraph(normalizeGraph(adoptLegacyClusterMembers(data.nodes), data.relationships));
-    setCanvasFitKey(value => value + 1);
+    if (!onlyIfChanged) setCanvasFitKey(value => value + 1);
   }, [projectId, markSynced]);
+
+  // R15: a sync pass changed the open map's lastSyncedAt, so it may have written cloud edits locally: reload, unless
+  // web conflicts are undecided or a save is pending (that save then 409s and merges as usual).
+  const syncedAt = sync.row?.lastSyncedAt ?? null;
+  const syncedAtSeen = useRef<{ id: string; at: number | null } | null>(null);
+  useEffect(() => {
+    const seen = syncedAtSeen.current;
+    syncedAtSeen.current = { id: projectId, at: syncedAt };
+    if (!seen || seen.id !== projectId || seen.at === syncedAt || syncedAt === null) return;
+    if (conflicts.length || saveInFlight.current || saveState !== 'saved' || loadedProject !== projectId) return;
+    reloadGraph(true).catch(() => announce('Could not reload this map after syncing.'));
+  }, [syncedAt, projectId, conflicts.length, saveState, loadedProject, reloadGraph, announce]);
+
+  // Desktop conflicts live on the sync row; this names the map whose conflicts are open in the panel.
+  const [syncConflictsFor, setSyncConflictsFor] = useState<string | null>(null);
+  const openSyncConflicts = useCallback((id: string) => {
+    setMapsManagerOpen(false);
+    if ([...projects, ...personalProjects].some(p => p.id === id)) openMap(id); // so the panel can name the map's notes
+    setSyncConflictsFor(id);
+  }, [projects, personalProjects, openMap]);
+  const syncConflicts = sync.rows.find(r => r.projectId === syncConflictsFor)?.conflicts ?? [];
+  const resolveSyncConflict = useCallback(async (conflictId: string, choice: ResolutionChoice) => {
+    const id = syncConflictsFor;
+    if (!id) return;
+    const kind = sync.rows.find(r => r.projectId === id)?.conflicts.find(c => c.id === conflictId)?.kind;
+    const result = await sync.act({ action: 'resolve', projectId: id, conflictId, choice });
+    if (!result) return;
+    if (!result.rows?.find(r => r.projectId === id)?.conflicts.length) setSyncConflictsFor(null);
+    if (kind === 'project' || id !== projectIdRef.current) { await loadProjects(); return; } // the map may be gone, or back
+    await reloadGraph().catch(() => announce('Could not reload this map.'));
+  }, [syncConflictsFor, sync, loadProjects, reloadGraph, announce]);
 
   const reloadHistory = useCallback(async () => {
     const data = await readJson<{ sessions: ResearchSession[] }>(await fetch(`/api/research?projectId=${encodeURIComponent(projectId)}`, { cache: 'no-store' }));
@@ -1826,7 +1900,7 @@ export default function SynthexWorkspace() {
 
   function handleImport(event: React.ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
-    if (!file) return;
+    if (!file || refuseReadOnly()) return;
     const reader = new FileReader();
     reader.onload = () => {
       try {
@@ -1863,7 +1937,7 @@ export default function SynthexWorkspace() {
 
   function handleBibImport(event: React.ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
-    if (!file) return;
+    if (!file || refuseReadOnly()) return;
     const reader = new FileReader();
     reader.onload = async () => {
       try {
@@ -2111,6 +2185,7 @@ export default function SynthexWorkspace() {
             {conflicts.length > 0
               ? <button type="button" className="topbar-conflicts" onClick={() => setConflictPanelOpen(true)}>{`${conflicts.length} conflict${conflicts.length === 1 ? '' : 's'} need your decision`}</button>
               : <span className={`topbar-save ${saveState}`} role="status">{saveState === 'saving' ? 'Saving…' : saveState === 'error' ? 'Not saved' : 'Saved'}</span>}
+            <SyncStatusChip sync={sync} onOpenConflicts={() => setSyncConflictsFor(projectId)} />
           </div>
 
           <div className="topbar-center">
@@ -2146,7 +2221,7 @@ export default function SynthexWorkspace() {
 
           <div className="topbar-actions">
             {/* Phones only: the chat panel gets its own button next to the "…" menu */}
-            {section === 'canvas' && (
+            {section === 'canvas' && !aiDesktop && (
               <button
                 type="button"
                 className={`icon-button topbar-chat-button ${rightDrawerOpen ? 'is-active' : ''}`}
@@ -2221,11 +2296,12 @@ export default function SynthexWorkspace() {
           {section === 'canvas' ? <>
             <div className={`canvas-and-inspector layout-${layout}`}>
               <div className="graph-wrap">
+                {sync.row?.readOnly && <ReadOnlyBanner onExport={() => void exportObsidianVault()} onRemove={() => void removeFromDevice(projectId, project?.title || 'Untitled map')} />}
                 {loading ? <div className="canvas-loading"><LoaderCircle size={21} className="spin" />Opening your map…</div> : Object.keys(displayGraph.nodesById).length === 0 ? <><div className="map-start">
                   <div className="map-start-inner">
                     <h1>What are you trying to figure&nbsp;out?</h1>
                     <p className="map-start-lede">Ask a question, dump your thoughts, or paste notes. Synthex pins it onto a map you can reshape, then share anywhere.</p>
-                    {researching ? <div className="composer">{composerStatus}</div> : (
+                    {researching ? <div className="composer">{composerStatus}</div> : aiDesktop ? null : (
                       <ToolComposer
                         inputId="map-question"
                         inputLabel="Your question or notes"
@@ -2246,7 +2322,7 @@ export default function SynthexWorkspace() {
                         autoFocus
                       />
                     )}
-                    {!aiConfigured && <p className="composer-note">AI is not set up on this server yet, so maps can only be built by hand. Add OPENAI_API_KEY or GEMINI_API_KEY to enable it.</p>}
+                    {aiDesktop ? <p className="composer-note">AI is available in the web app.</p> : !aiConfigured && <p className="composer-note">AI is not set up on this server yet, so maps can only be built by hand. Add OPENAI_API_KEY or GEMINI_API_KEY to enable it.</p>}
                   </div>
                 </div><EmptyMapGuide /></> : <GraphCanvas
                   graph={displayGraph} draftIds={draftIds} detachingIds={detachingIds} keptIds={keptIds} sketch={sketch} sketchStyle={sketchStyle} onSketchChange={saveSketch} selectedNodeIds={selectedIds} viewport={viewport} setViewport={setViewport} activeTool={tool} spacePressed={spacePressed}
@@ -2293,7 +2369,9 @@ export default function SynthexWorkspace() {
                 )}
 
                 {!loading && Object.keys(displayGraph.nodesById).length > 0 && (
-                  researching ? <div className="composer dock-composer">{composerStatus}</div> : (
+                  researching ? <div className="composer dock-composer">{composerStatus}</div> : aiDesktop ? (
+                    <p className="composer dock-composer composer-note">AI is available in the web app.</p>
+                  ) : (
                     <ToolComposer
                       className="dock-composer"
                       inputId="dock-question"
@@ -2329,7 +2407,7 @@ export default function SynthexWorkspace() {
                 />
               )}
 
-              <aside className={`workspace-drawer ${rightDrawerOpen ? 'is-open' : ''}`} aria-label="Chat about your map">
+              {!aiDesktop && <aside className={`workspace-drawer ${rightDrawerOpen ? 'is-open' : ''}`} aria-label="Chat about your map">
                 <div className="drawer-header">
                   <div className="drawer-tabs">
                     <h2 className="drawer-tab active">Chat</h2>
@@ -2424,7 +2502,7 @@ export default function SynthexWorkspace() {
 
                     </div>
                 </div>
-              </aside>
+              </aside>}
             </div>
           </> : <div className="views-stage">
             <KnowledgeViews
@@ -2526,6 +2604,9 @@ export default function SynthexWorkspace() {
 
       {conflictPanelOpen && conflicts.length > 0 && <ConflictPanel conflicts={conflicts} graph={{ nodes, relationships: edges }} onResolve={resolveConflict} onClose={() => setConflictPanelOpen(false)} />}
 
+      {syncConflictsFor && syncConflicts.length > 0 && <ConflictPanel conflicts={syncConflicts} graph={syncConflictsFor === projectId ? { nodes, relationships: edges } : undefined} onResolve={(id, choice) => void resolveSyncConflict(id, choice)} onClose={() => setSyncConflictsFor(null)} />}
+      {sync.enabled && <ConnectDialog sync={sync} />}
+
       {briefFor && <MapBriefDialog mapTitle={briefFor.title} onSave={saveBrief} onSkip={skipBrief} />}
 
       {mapsManagerOpen && (
@@ -2543,7 +2624,11 @@ export default function SynthexWorkspace() {
           creating={creatingProject}
           onCreate={createProject}
           onClose={closeMapsManager}
-        />
+          badgeFor={sync.enabled ? mapSyncBadge(sync) : undefined}
+          extraActions={sync.enabled ? mapSyncActions(sync, { onRemove: (id, title) => void removeFromDevice(id, title), onResolve: openSyncConflicts, onChanged: () => void loadProjects() }) : undefined}
+        >
+          {sync.enabled && <DesktopMapsSection sync={sync} localIds={[...projects, ...personalProjects].map(p => p.id)} onResolve={openSyncConflicts} onChanged={() => void loadProjects()} />}
+        </MapsManager>
       )}
 
       {editorId && graph.nodesById[editorId] && (
