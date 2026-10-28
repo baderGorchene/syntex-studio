@@ -30,7 +30,7 @@ export function ConnectDialog({ sync }: { sync: DesktopSync }) {
     if (busy) return;
     if (upload) { await finish(); return; }
     setBusy(true);
-    await sync.act({ action: 'disconnect' });
+    await sync.act({ action: 'cancel-connect' }); // R25: a connected account stays connected
     await sync.refresh();
     setBusy(false);
   };

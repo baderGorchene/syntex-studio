@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { mergeGraphs, sameGraph } from '../src/lib/sync/merge.ts';
 import { applyResolution } from '../src/lib/sync/resolve.ts';
-import { syncAll, syncProject } from '../src/lib/sync/engine.ts';
+import { hasUnsyncedWork, syncAll, syncProject } from '../src/lib/sync/engine.ts';
 import { normalizeGraph } from '../src/lib/graph.ts';
 import { isAllowedDesktopRequest } from '../src/lib/desktop-host.ts';
 import { canRepair, isMapReadOnly, needsUnsyncedWarning, syncLabel } from '../src/lib/sync/ui.ts';
@@ -684,4 +684,16 @@ test('desktop sync UI decisions', () => {
   assert.equal(canRepair(row({ status: 'error', error: 'Stored sync data is damaged.' })), true);
   assert.equal(canRepair(row({ status: 'error', error: 'Could not reach the cloud.' })), false);
   assert.equal(canRepair(null), false);
+});
+
+test('R24: unsynced work includes local edits since the last pass', () => {
+  const base = graph([node('a', { metadata: {} })]);
+  const row = (extra = {}) => ({ status: 'synced', baseVersion: 3, baseGraph: base, ...extra });
+  assert.equal(hasUnsyncedWork(row(), graph([node('a')])), false); // {} metadata is no metadata
+  assert.equal(hasUnsyncedWork(row(), graph([node('a', { content: 'offline edit' })])), true);
+  assert.equal(hasUnsyncedWork(row({ status: 'pending' }), graph([node('a')])), true);
+  assert.equal(hasUnsyncedWork(row({ baseVersion: null }), graph([node('a')])), true);
+  assert.equal(hasUnsyncedWork(row({ baseGraph: null }), graph([node('a')])), true);
+  assert.equal(hasUnsyncedWork(row(), null), true);
+  assert.equal(hasUnsyncedWork(null, graph()), true);
 });

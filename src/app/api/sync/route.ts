@@ -3,7 +3,7 @@ import { getServerAuth } from '@/lib/auth';
 import { deleteProjectFromDb, getProjectsFromDb, projectExistsInDb } from '@/lib/db';
 import { syncGraphVectors } from '@/lib/rag/vector-store';
 import { CloudError, createCloudClient } from '@/lib/sync/cloud-client';
-import { syncAll, syncProject } from '@/lib/sync/engine';
+import { hasUnsyncedWork, syncAll, syncProject } from '@/lib/sync/engine';
 import { applyResolution, type ResolutionChoice } from '@/lib/sync/resolve';
 import { syncStore, type SyncAccount, type SyncRow } from '@/lib/sync/store';
 
@@ -69,7 +69,8 @@ const newRow = (projectId: string, accountId: string, baseVersion: number | null
 });
 
 // R23: destroying a local copy that may hold work the cloud doesn't have needs an explicit `confirm: true`.
-const needsConfirm = (row: SyncRow | null) => !row || row.status !== 'synced' || row.baseVersion === null;
+// R24: local edits since the last pass count too (autosaves never touch the row's status).
+const needsConfirm = (row: SyncRow | null) => hasUnsyncedWork(row, row ? syncStore.readLocalGraph(row.projectId) : null);
 const unsynced = () => Response.json({ error: 'This map has changes that are not in the cloud.', unsynced: true }, { status: 409 });
 
 export async function GET() {
@@ -141,6 +142,11 @@ export async function POST(request: Request) {
         // Rows of a previously connected account stay; the engine only syncs rows of this userId.
         syncStore.setAccount({ token, userId, cloudUrl: url, connectedAt: Date.now() });
         return Response.json({ userId, localOnly: await localOnly(), rows: publicRows() });
+      }
+
+      case 'cancel-connect': {
+        clearPending(); // R25: only the waiting sign-in; a connected account stays
+        return Response.json({ rows: publicRows() });
       }
 
       case 'disconnect': {

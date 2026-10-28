@@ -69,7 +69,7 @@ export function useDesktopSync(projectId: string | null, announce: (message: str
       if (response.status === 409 && data.unsynced) return { unsynced: true };
       if (!response.ok) throw new Error(typeof data.error === 'string' ? data.error : '');
       const action = (body as { action?: unknown }).action;
-      const settled = action === 'confirm-connect' || action === 'disconnect'; // the waiting sign-in is gone either way
+      const settled = action === 'confirm-connect' || action === 'cancel-connect' || action === 'disconnect'; // the waiting sign-in is gone either way
       if (alive.current && (Array.isArray(data.rows) || settled)) {
         setStatus(current => ({ ...current, rows: data.rows ?? current.rows, pending: settled ? null : current.pending }));
       }
@@ -114,14 +114,21 @@ export function useDesktopSync(projectId: string | null, announce: (message: str
     void quietSync();
     const timer = setInterval(() => { if (!disabled.current) void quietSync(); }, POLL_MS);
     const onOnline = () => { if (!disabled.current) void quietSync(); };
+    // Back from the system browser: pick up a waiting sign-in at once (refresh reuses a running request).
+    const onFocus = () => { if (!disabled.current) void refresh(); };
+    const onVisible = () => { if (document.visibilityState === 'visible') onFocus(); };
     window.addEventListener('online', onOnline);
+    window.addEventListener('focus', onFocus);
+    document.addEventListener('visibilitychange', onVisible);
     return () => {
       alive.current = false;
       clearInterval(timer);
       if (afterSave.current) clearTimeout(afterSave.current);
       window.removeEventListener('online', onOnline);
+      window.removeEventListener('focus', onFocus);
+      document.removeEventListener('visibilitychange', onVisible);
     };
-  }, [quietSync]);
+  }, [quietSync, refresh]);
 
   /**
    * R23: delete-local or remove-from-device. Warns up front for rows with unsynced work, and again if the server

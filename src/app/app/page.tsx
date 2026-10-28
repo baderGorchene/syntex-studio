@@ -379,7 +379,8 @@ export default function SynthexWorkspace() {
   // A graph that arrived from teammates. Our undo history is rebased onto it, so Ctrl+Z only ever takes back our own
   // edits and never a teammate's.
   const remoteGraphRef = useRef<KnowledgeGraph | null>(null);
-  const applyRemoteGraph = useCallback((next: KnowledgeGraph, changed: RemoteChange) => {
+  /** Carries the changed ids of `next` into every undo/redo snapshot, so undo never reverts edits made elsewhere. */
+  const rebaseHistory = useCallback((next: KnowledgeGraph, changed: RemoteChange) => {
     const rebase = (snapshot: KnowledgeGraph): KnowledgeGraph => {
       const nodesById = { ...snapshot.nodesById };
       const edgesById = { ...snapshot.edgesById };
@@ -390,9 +391,12 @@ export default function SynthexWorkspace() {
     };
     undoStack.current = undoStack.current.map(rebase);
     redoStack.current = redoStack.current.map(rebase);
+  }, []);
+  const applyRemoteGraph = useCallback((next: KnowledgeGraph, changed: RemoteChange) => {
+    rebaseHistory(next, changed);
     remoteGraphRef.current = next;
     setGraph(next);
-  }, []);
+  }, [rebaseHistory]);
 
   const restoreRevision = useCallback(async (revisionId: string) => {
     if (refuseReadOnly()) return;
@@ -1163,9 +1167,18 @@ export default function SynthexWorkspace() {
     const data = await readJson<GraphResponse>(await fetch(`/api/graph?projectId=${encodeURIComponent(projectId)}`, { cache: 'no-store' }));
     if (onlyIfChanged && (projectId !== projectIdRef.current || graphRef.current !== before || data.version === graphVersionRef.current)) return;
     markSynced(data);
-    setGraph(normalizeGraph(adoptLegacyClusterMembers(data.nodes), data.relationships));
+    const next = normalizeGraph(adoptLegacyClusterMembers(data.nodes), data.relationships);
+    if (onlyIfChanged) {
+      // A background pull: rebase undo/redo onto it, so Ctrl+Z can't restore (and then push) the pre-pull map.
+      const differs = (a: unknown, b: unknown) => JSON.stringify(a) !== JSON.stringify(b);
+      rebaseHistory(next, {
+        nodes: new Set([...Object.keys(before.nodesById), ...Object.keys(next.nodesById)].filter(id => differs(before.nodesById[id], next.nodesById[id]))),
+        edges: new Set([...Object.keys(before.edgesById), ...Object.keys(next.edgesById)].filter(id => differs(before.edgesById[id], next.edgesById[id])))
+      });
+    }
+    setGraph(next);
     if (!onlyIfChanged) setCanvasFitKey(value => value + 1);
-  }, [projectId, markSynced]);
+  }, [projectId, markSynced, rebaseHistory]);
 
   // R15: a sync pass changed the open map's lastSyncedAt, so it may have written cloud edits locally: reload, unless
   // web conflicts are undecided or a save is pending (that save then 409s and merges as usual).

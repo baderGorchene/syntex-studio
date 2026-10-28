@@ -33,12 +33,20 @@ const projectConflict = (id: string, reason: 'deleted-local' | 'deleted-remote')
   ({ id: `project:${id}`, kind: 'project', itemId: id, reason });
 
 /** sameGraph, but `metadata: {}` counts as no metadata (mergeGraphs drops empty metadata). */
-function unchanged(a: GraphSnapshot, b: GraphSnapshot): boolean {
+export function unchanged(a: GraphSnapshot, b: GraphSnapshot): boolean {
   const clean = (g: GraphSnapshot) => ({
     ...g,
     nodes: g.nodes.map(n => (n.metadata && !Object.keys(n.metadata).length ? { ...n, metadata: undefined } : n))
   });
   return sameGraph(clean(a), clean(b));
+}
+
+/**
+ * R23/R24: removing this map's local copy could lose work the cloud doesn't have. The row's status only moves during
+ * a sync pass, so local edits since the last pass are found by comparing the local map with the synced base.
+ */
+export function hasUnsyncedWork(row: SyncRow | null, local: GraphSnapshot | null): boolean {
+  return !row || row.status !== 'synced' || row.baseVersion === null || !row.baseGraph || !local || !unchanged(local, row.baseGraph);
 }
 
 /**
