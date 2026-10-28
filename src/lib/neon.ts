@@ -460,10 +460,16 @@ export async function neonGetAllNodes(projectId = 'default'): Promise<CanvasNode
   return rows.map(mapNeonNode);
 }
 
+type Sql = ReturnType<typeof getSql>;
+
 export async function neonSaveNode(node: CanvasNode, projectId = 'default'): Promise<void> {
   await ensureNeonSchema();
-  const sql = getSql();
-  await sql`
+  await nodeUpsert(getSql(), node, projectId);
+}
+
+/** Unawaited upsert, so it can also run inside a `sql.transaction([...])` batch. */
+function nodeUpsert(sql: Sql, node: CanvasNode, projectId: string) {
+  return sql`
     INSERT INTO nodes (
       id, project_id, type, x, y, width, height, color, title, content, items,
       image_url, caption, url, domain, description, section_id, file_data, file_name, file_size, file_type, page_count, metadata, created_at
@@ -564,8 +570,12 @@ export async function neonGetAllConnections(projectId = 'default'): Promise<Conn
 
 export async function neonSaveConnection(conn: Connection, projectId = 'default'): Promise<void> {
   await ensureNeonSchema();
-  const sql = getSql();
-  await sql`
+  await connectionUpsert(getSql(), conn, projectId);
+}
+
+/** Unawaited upsert, so it can also run inside a `sql.transaction([...])` batch. */
+function connectionUpsert(sql: Sql, conn: Connection, projectId: string) {
+  return sql`
     INSERT INTO connections (
       id, project_id, from_node, to_node, label, arrowhead, line_style, stroke_pattern, color, animated, metadata, created_at
     ) VALUES (
@@ -611,34 +621,34 @@ export async function neonBulkSaveCanvas(
   await ensureNeonSchema();
   const sql = getSql();
 
-  // ponytail: the version bump and the graph write are separate HTTP statements, not one transaction.
-  // A failed write leaves a bumped version, which only costs the next saver a harmless extra merge.
-  // Upgrade path: a Neon transaction (sql.transaction) if that ever matters.
-  const bumped = await sql`
-    UPDATE projects SET graph_version = graph_version + 1
-    WHERE id = ${projectId} AND (${baseVersion ?? null}::int IS NULL OR graph_version = ${baseVersion ?? null}::int)
-    RETURNING graph_version
-  `;
-  if (!bumped.length) return { saved: false, version: await neonGetGraphVersion(projectId) };
-  const version = Number(bumped[0].graph_version);
-
-  // Clear existing nodes and connections for the project
-  await sql`DELETE FROM nodes WHERE project_id = ${projectId}`;
-  await sql`DELETE FROM connections WHERE project_id = ${projectId}`;
-
-  // Batch insert nodes in parallel chunks
-  const chunkSize = 25;
-  for (let i = 0; i < nodes.length; i += chunkSize) {
-    const chunk = nodes.slice(i, i + chunkSize);
-    await Promise.all(chunk.map(node => neonSaveNode(node, projectId)));
+  // ponytail: the whole save is one HTTP transaction (guarded bump, deletes, every insert), so its size is
+  // bounded only by the route caps (5,000 nodes / 15,000 links). Chunk into a COPY or staging table if that grows.
+  // Guard and bump are ONE statement: under READ COMMITTED a concurrent save holding the row lock makes this UPDATE
+  // re-check `graph_version = base` after it commits, so two saves from the same base can't both win. When the UPDATE
+  // matches nothing, `1 / 0` raises division_by_zero (22012) and rolls the whole batch back.
+  const base = baseVersion ?? null;
+  try {
+    const [bumped] = await sql.transaction([
+      sql`
+        WITH bumped AS (
+          UPDATE projects SET graph_version = graph_version + 1
+          WHERE id = ${projectId} AND (${base}::int IS NULL OR graph_version = ${base}::int)
+          RETURNING graph_version
+        )
+        SELECT (SELECT graph_version FROM bumped) AS graph_version, 1 / (SELECT count(*)::int FROM bumped) AS ok
+      `,
+      sql`DELETE FROM nodes WHERE project_id = ${projectId}`,
+      sql`DELETE FROM connections WHERE project_id = ${projectId}`,
+      ...nodes.map(node => nodeUpsert(sql, node, projectId)),
+      ...connections.map(conn => connectionUpsert(sql, conn, projectId))
+    ]);
+    return { saved: true, version: Number((bumped as Array<{ graph_version: number | string }>)[0].graph_version) };
+  } catch (error) {
+    if (baseVersion !== undefined && (error as { code?: string })?.code === '22012') {
+      return { saved: false, version: await neonGetGraphVersion(projectId) };
+    }
+    throw error;
   }
-
-  // Batch insert connections in parallel chunks
-  for (let i = 0; i < connections.length; i += chunkSize) {
-    const chunk = connections.slice(i, i + chunkSize);
-    await Promise.all(chunk.map(conn => neonSaveConnection(conn, projectId)));
-  }
-  return { saved: true, version };
 }
 
 // ============================================================================
@@ -760,19 +770,18 @@ export async function neonReviewResearchSession(
     changes
   };
 
-  // Commit accepted nodes and connections to database
-  await Promise.all([
-    ...accepted.filter(item => item.kind === 'node').map(item => neonSaveNode(item.payload as CanvasNode, projectId)),
-    ...accepted.filter(item => item.kind === 'relationship').map(item => neonSaveConnection(item.payload as Connection, projectId))
-  ]);
-
+  // Commit accepted nodes and connections, the version bump and the session status together.
   const sql = getSql();
-  if (accepted.length) await sql`UPDATE projects SET graph_version = graph_version + 1 WHERE id = ${projectId}`;
-  await sql`
-    UPDATE research_sessions
-    SET status = ${updated.status}, changes = ${JSON.stringify(updated.changes)}
-    WHERE id = ${id} AND project_id = ${projectId}
-  `;
+  await sql.transaction([
+    ...accepted.filter(item => item.kind === 'node').map(item => nodeUpsert(sql, item.payload as CanvasNode, projectId)),
+    ...accepted.filter(item => item.kind === 'relationship').map(item => connectionUpsert(sql, item.payload as Connection, projectId)),
+    ...(accepted.length ? [sql`UPDATE projects SET graph_version = graph_version + 1 WHERE id = ${projectId}`] : []),
+    sql`
+      UPDATE research_sessions
+      SET status = ${updated.status}, changes = ${JSON.stringify(updated.changes)}
+      WHERE id = ${id} AND project_id = ${projectId}
+    `
+  ]);
 
   return updated;
 }

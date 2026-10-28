@@ -26,7 +26,8 @@ export async function GET(request: Request) {
     if (!projectId || !(await userHasProjectAccess(projectId, userId, orgId, clerkId))) {
       return Response.json({ error: 'Project not found.' }, { status: 404 });
     }
-    // Version first: if a save lands in between, the client sees newer data with an older version and just merges again.
+    // Version before data. Saves bump the version atomically with the write (SQLite and Neon transactions), so a save
+    // landing between these reads can only pair newer data with an older version: the next PUT gets a 409 and merges again.
     const version = await getGraphVersion(projectId);
     const rawNodes = (await getAllNodesFromDb(projectId)) as CanvasNode[];
     const rawEdges = (await getAllConnectionsFromDb(projectId)) as Connection[];
