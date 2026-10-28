@@ -265,6 +265,8 @@ export default function SynthexWorkspace() {
   const loadRequest = useRef(0);
   const graphRef = useRef(graph);
   graphRef.current = graph;
+  const projectIdRef = useRef(projectId);
+  projectIdRef.current = projectId;
 
   const announce = useCallback((message: string) => {
     setNotice(message);
@@ -340,6 +342,15 @@ export default function SynthexWorkspace() {
   const projectTitleRef = useRef('');
   const [conflicts, setConflicts] = useState<GraphConflict[]>([]);
   const [conflictPanelOpen, setConflictPanelOpen] = useState(false);
+  const conflictsRef = useRef(conflicts);
+  conflictsRef.current = conflicts;
+  // Undecided conflicts pause saving, so no other map opens until they are decided (the merged map is unsaved).
+  const conflictsBlockSwitch = useCallback((id?: string) => {
+    if (!conflictsRef.current.length || id === projectIdRef.current) return false;
+    announce('Resolve the conflicts on this map before opening another.');
+    setConflictPanelOpen(true);
+    return true;
+  }, [announce]);
   const markSynced = useCallback((data: GraphResponse) => {
     graphVersionRef.current = data.version;
     lastSyncedGraphRef.current = { title: projectTitleRef.current, nodes: data.nodes, relationships: data.relationships };
@@ -407,6 +418,7 @@ export default function SynthexWorkspace() {
   }, [projectId, graph, announce]);
 
   const loadProject = useCallback(async (id: string) => {
+    if (conflictsRef.current.length) return; // switching is blocked; a reload of this map would drop the unsaved merge
     const requestId = ++loadRequest.current;
     setLoading(true);
     setLoadedProject('');
@@ -427,7 +439,6 @@ export default function SynthexWorkspace() {
       if (requestId !== loadRequest.current) return;
       markSynced(graphBody);
       mergeRetries.current = 0;
-      setConflicts([]);
       setGraph(normalizeGraph(adoptLegacyClusterMembers(graphBody.nodes), graphBody.relationships));
       setCanvasFitKey(value => value + 1);
       setSessions(historyBody.sessions);
@@ -456,6 +467,7 @@ export default function SynthexWorkspace() {
         const stored = typeof window !== 'undefined' ? localStorage.getItem('synthex_active_project_id') : null;
         const matching = [...data.projects, ...(data.personalProjects || [])].find(p => p.id === stored);
         const nextId = matching ? matching.id : data.projects[0].id;
+        if (conflictsBlockSwitch(nextId)) return;
         setProjectId(nextId);
         if (typeof window !== 'undefined') {
           localStorage.setItem('synthex_active_project_id', nextId);
@@ -464,7 +476,7 @@ export default function SynthexWorkspace() {
     } catch (error) {
       announce(error instanceof Error ? error.message : 'Could not load projects.');
     }
-  }, [announce]);
+  }, [announce, conflictsBlockSwitch]);
 
   const moveProject = useCallback(async (id: string, workspace: 'team' | 'personal') => {
     try {
@@ -482,11 +494,12 @@ export default function SynthexWorkspace() {
 
   /** Opens a map from the dropdown or the maps manager, a personal one included while in a team. */
   const openMap = useCallback((id: string) => {
+    if (conflictsBlockSwitch(id)) return;
     setProjectId(id);
     if (typeof window !== 'undefined') localStorage.setItem('synthex_active_project_id', id);
     setProjectMenuOpen(false);
     setMapsManagerOpen(false);
-  }, []);
+  }, [conflictsBlockSwitch]);
   const closeMapsManager = useCallback(() => setMapsManagerOpen(false), []);
   const skipBrief = useCallback(() => setBriefFor(null), []);
   const saveBrief = useCallback((brief: MapBrief) => {
@@ -513,6 +526,7 @@ export default function SynthexWorkspace() {
   }, [announce]);
 
   const deleteProject = useCallback(async (id: string) => {
+    if (id === projectIdRef.current && conflictsBlockSwitch()) return false; // deleting the open map opens another
     try {
       await readJson(await fetch(`/api/projects?projectId=${encodeURIComponent(id)}`, { method: 'DELETE' }));
       removeMapBrief(id);
@@ -527,7 +541,7 @@ export default function SynthexWorkspace() {
       announce(error instanceof Error ? error.message : 'Could not delete that map.');
       return false;
     }
-  }, [announce, loadProjects]);
+  }, [announce, loadProjects, conflictsBlockSwitch]);
 
   useEffect(() => {
     let cancelled = false;
@@ -641,7 +655,7 @@ export default function SynthexWorkspace() {
       return;
     }
     const requestId = loadRequest.current;
-    const cloud = await readJson<GraphResponse>(await fetch(`/api/graph?projectId=${encodeURIComponent(projectId)}`, { cache: 'no-store' }));
+    const cloud = await readJson<GraphResponse>(await fetch(`/api/graph?projectId=${encodeURIComponent(projectIdRef.current)}`, { cache: 'no-store' }));
     if (requestId !== loadRequest.current) return; // another map was opened meanwhile
     const title = projectTitleRef.current;
     const local = graphRef.current; // includes edits made while the save and this fetch were in flight
@@ -658,7 +672,58 @@ export default function SynthexWorkspace() {
     applyRemoteGraph(next, changed);
     if (found.length) { setConflicts(found); setConflictPanelOpen(true); }
     if (dropped.length) announce(`${plural(dropped.length, 'link')} removed: a note it joined was deleted elsewhere.`);
-  }, [projectId, announce, applyRemoteGraph, markSynced]);
+  }, [announce, applyRemoteGraph, markSynced]);
+
+  // One PUT at a time, so each carries the version the previous one returned. A save asked for meanwhile is queued
+  // and runs once, with the latest map, after a successful save. After a 409 the merge itself triggers the next save.
+  const saveInFlight = useRef(false);
+  const saveQueued = useRef(false);
+  const saveNow = useCallback(async () => {
+    if (saveInFlight.current) { saveQueued.current = true; return; }
+    saveInFlight.current = true;
+    try {
+      do {
+        saveQueued.current = false;
+        const requestId = loadRequest.current;
+        const id = projectIdRef.current;
+        const saving = graphRef.current;
+        const fromTeammate = saving === remoteGraphRef.current;
+        const nodes = Object.values(saving.nodesById);
+        const relationships = Object.values(saving.edgesById);
+        const response = await fetch('/api/graph', {
+          method: 'PUT', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ projectId: id, baseVersion: graphVersionRef.current, nodes, relationships })
+        });
+        if (requestId !== loadRequest.current || id !== projectIdRef.current) return; // another map was opened meanwhile
+        if (response.status === 409) { await mergeWithCloud(); return; }
+        const { version } = await readJson<{ version: number }>(response);
+        markSynced({ version, nodes, relationships });
+        mergeRetries.current = 0;
+        if (!saveQueued.current) setSaveState('saved');
+        const now = Date.now();
+        if (!fromTeammate && now - lastRevisionTime.current > 120_000) {
+          lastRevisionTime.current = now;
+          fetch('/api/revisions', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              projectId: id,
+              action: 'create',
+              title: `Auto-saved snapshot (${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })})`,
+              nodes,
+              relationships
+            })
+          }).catch(() => { });
+        }
+      } while (saveQueued.current);
+    } catch (error) {
+      setSaveState('error');
+      announce(error instanceof Error ? error.message : 'Changes could not be saved.');
+    } finally {
+      saveInFlight.current = false;
+      saveQueued.current = false;
+    }
+  }, [announce, mergeWithCloud, markSynced]);
 
   const paused = conflicts.length > 0;
   useEffect(() => {
@@ -668,39 +733,18 @@ export default function SynthexWorkspace() {
     const fromTeammate = graph === remoteGraphRef.current;
     if (!fromTeammate) mergeRetries.current = 0; // a fresh edit of ours gets a fresh set of merge attempts
     setSaveState('saving');
-    const timer = setTimeout(async () => {
-      try {
-        const response = await fetch('/api/graph', {
-          method: 'PUT', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ projectId, baseVersion: graphVersionRef.current, nodes: Object.values(graph.nodesById), relationships: Object.values(graph.edgesById) })
-        });
-        if (response.status === 409) { await mergeWithCloud(); return; }
-        const { version } = await readJson<{ version: number }>(response);
-        markSynced({ version, nodes: Object.values(graph.nodesById), relationships: Object.values(graph.edgesById) });
-        mergeRetries.current = 0;
-        setSaveState('saved');
-        const now = Date.now();
-        if (!fromTeammate && now - lastRevisionTime.current > 120_000) {
-          lastRevisionTime.current = now;
-          fetch('/api/revisions', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              projectId,
-              action: 'create',
-              title: `Auto-saved snapshot (${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })})`,
-              nodes: Object.values(graph.nodesById),
-              relationships: Object.values(graph.edgesById)
-            })
-          }).catch(() => { });
-        }
-      } catch (error) {
-        setSaveState('error');
-        announce(error instanceof Error ? error.message : 'Changes could not be saved.');
-      }
-    }, fromTeammate ? 1500 + Math.round(Math.random() * 1000) : 450);
+    const timer = setTimeout(() => { void saveNow(); }, fromTeammate ? 1500 + Math.round(Math.random() * 1000) : 450);
     return () => clearTimeout(timer);
-  }, [graph, projectId, loadedProject, loading, paused, announce, mergeWithCloud, markSynced]);
+  }, [graph, projectId, loadedProject, loading, paused, saveNow]);
+
+  // Leaving the page now would lose work: undecided conflicts pause saving, and a save may be queued or in flight.
+  const unsaved = paused || saveState !== 'saved';
+  useEffect(() => {
+    if (!unsaved) return;
+    const warn = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = ''; };
+    window.addEventListener('beforeunload', warn);
+    return () => window.removeEventListener('beforeunload', warn);
+  }, [unsaved]);
 
   const resolveConflict = useCallback((conflictId: string, choice: ResolutionChoice) => {
     const conflict = conflicts.find(item => item.id === conflictId);
@@ -1087,7 +1131,7 @@ export default function SynthexWorkspace() {
 
   async function createProject(event: FormEvent) {
     event.preventDefault();
-    if (creatingProject) return;
+    if (creatingProject || conflictsBlockSwitch()) return;
     setCreatingProject(true);
     try {
       const data = await readJson<{ project: ResearchProject }>(await fetch('/api/projects', {
@@ -2454,9 +2498,11 @@ export default function SynthexWorkspace() {
               }
               return prev;
             });
-            setProjectId(project.id);
-            if (typeof window !== 'undefined') {
-              localStorage.setItem('synthex_active_project_id', project.id);
+            if (!conflictsBlockSwitch(project.id)) {
+              setProjectId(project.id);
+              if (typeof window !== 'undefined') {
+                localStorage.setItem('synthex_active_project_id', project.id);
+              }
             }
           }
         }}
