@@ -28,6 +28,9 @@ import { ChatToolCard } from '@/components/research/ChatToolCard';
 import { ToolComposer, type ComposerTool } from '@/components/research/ToolComposer';
 import { MarkdownView, decodeEntities } from '@/components/research/MarkdownView';
 import { DocumentPane } from '@/components/research/DocumentPane';
+import { ConflictPanel } from '@/components/sync/ConflictPanel';
+import { mergeGraphs, type GraphConflict, type GraphSnapshot } from '@/lib/sync/merge';
+import { applyResolution, type ResolutionChoice } from '@/lib/sync/resolve';
 import { LiveResearchCard, type ResearchLiveProgress } from '@/components/research/LiveResearchCard';
 import type { ChatToolCall } from '@/types/chat-tools';
 import { computeOrganizedLayout } from '@/lib/graph-organizer';
@@ -66,6 +69,10 @@ type Modal = 'chat' | 'project' | 'search' | 'credits' | null;
 
 const blankGraph = (): KnowledgeGraph => normalizeGraph([], []);
 const newId = () => globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+// A web save that 409s merges with the cloud and retries; this many merges in a row without a save stops it.
+const MAX_MERGE_RETRIES = 5;
+type GraphResponse = { nodes: CanvasNode[]; relationships: Connection[]; version: number };
+const toSnapshot = (graph: KnowledgeGraph, title: string): GraphSnapshot => ({ title, nodes: Object.values(graph.nodesById), relationships: Object.values(graph.edgesById) });
 const errorText = (body: unknown, fallback: string) => typeof body === 'object' && body !== null && 'error' in body && typeof body.error === 'string' ? body.error : fallback;
 
 async function readJson<T>(response: Response): Promise<T> {
@@ -326,6 +333,17 @@ export default function SynthexWorkspace() {
   }, []);
 
   const lastRevisionTime = useRef(Date.now());
+  // Sync: the server version our edits are based on, and the map as it was then (the merge base on a 409).
+  const graphVersionRef = useRef<number | undefined>(undefined);
+  const lastSyncedGraphRef = useRef<GraphSnapshot | null>(null);
+  const mergeRetries = useRef(0);
+  const projectTitleRef = useRef('');
+  const [conflicts, setConflicts] = useState<GraphConflict[]>([]);
+  const [conflictPanelOpen, setConflictPanelOpen] = useState(false);
+  const markSynced = useCallback((data: GraphResponse) => {
+    graphVersionRef.current = data.version;
+    lastSyncedGraphRef.current = { title: projectTitleRef.current, nodes: data.nodes, relationships: data.relationships };
+  }, []);
 
   // ---- Live collaboration -------------------------------------------------------------------------------------
   // A graph that arrived from teammates. Our undo history is rebased onto it, so Ctrl+Z only ever takes back our own
@@ -403,10 +421,13 @@ export default function SynthexWorkspace() {
         fetch(`/api/research?projectId=${encodeURIComponent(id)}`, { cache: 'no-store' })
       ]);
       const [graphBody, historyBody] = await Promise.all([
-        readJson<{ nodes: CanvasNode[]; relationships: Connection[] }>(graphResponse),
+        readJson<GraphResponse>(graphResponse),
         readJson<{ sessions: ResearchSession[] }>(historyResponse)
       ]);
       if (requestId !== loadRequest.current) return;
+      markSynced(graphBody);
+      mergeRetries.current = 0;
+      setConflicts([]);
       setGraph(normalizeGraph(adoptLegacyClusterMembers(graphBody.nodes), graphBody.relationships));
       setCanvasFitKey(value => value + 1);
       setSessions(historyBody.sessions);
@@ -419,7 +440,7 @@ export default function SynthexWorkspace() {
     } finally {
       if (requestId === loadRequest.current) setLoading(false);
     }
-  }, [announce]);
+  }, [announce, markSynced]);
 
   const loadProjects = useCallback(async () => {
     try {
@@ -611,18 +632,52 @@ export default function SynthexWorkspace() {
     announce(`Jumped to ${peer.user.name}.`);
   }, [announce]);
 
+  // A save hit 409: someone saved this map since we loaded it. Three-way merge with the cloud copy, show it as a
+  // remote update (no undo entry, no history snapshot), then autosave runs again on the new version.
+  const mergeWithCloud = useCallback(async () => {
+    if (++mergeRetries.current > MAX_MERGE_RETRIES) {
+      setSaveState('error');
+      announce('Changes not saved: this map keeps changing elsewhere. Your next edit will try again.');
+      return;
+    }
+    const requestId = loadRequest.current;
+    const cloud = await readJson<GraphResponse>(await fetch(`/api/graph?projectId=${encodeURIComponent(projectId)}`, { cache: 'no-store' }));
+    if (requestId !== loadRequest.current) return; // another map was opened meanwhile
+    const title = projectTitleRef.current;
+    const local = graphRef.current; // includes edits made while the save and this fetch were in flight
+    const remote = { title, nodes: cloud.nodes, relationships: cloud.relationships };
+    const base = { ...(lastSyncedGraphRef.current ?? remote), title };
+    const { merged, conflicts: found, dropped } = mergeGraphs(base, toSnapshot(local, title), remote);
+    markSynced(cloud);
+    const next = normalizeGraph(merged.nodes, merged.relationships);
+    const differs = (a: unknown, b: unknown) => JSON.stringify(a) !== JSON.stringify(b);
+    const changed: RemoteChange = {
+      nodes: new Set([...Object.keys(local.nodesById), ...Object.keys(next.nodesById)].filter(id => differs(local.nodesById[id], next.nodesById[id]))),
+      edges: new Set([...Object.keys(local.edgesById), ...Object.keys(next.edgesById)].filter(id => differs(local.edgesById[id], next.edgesById[id])))
+    };
+    applyRemoteGraph(next, changed);
+    if (found.length) { setConflicts(found); setConflictPanelOpen(true); }
+    if (dropped.length) announce(`${plural(dropped.length, 'link')} removed: a note it joined was deleted elsewhere.`);
+  }, [projectId, announce, applyRemoteGraph, markSynced]);
+
+  const paused = conflicts.length > 0;
   useEffect(() => {
-    if (!loadedProject || loadedProject !== projectId || loading) return;
+    if (!loadedProject || loadedProject !== projectId || loading || paused) return;
     // Everyone on a live map saves the merged map; teammates' edits wait a little longer so the person who made
     // them usually saves first, and only our own edits make history snapshots.
     const fromTeammate = graph === remoteGraphRef.current;
+    if (!fromTeammate) mergeRetries.current = 0; // a fresh edit of ours gets a fresh set of merge attempts
     setSaveState('saving');
     const timer = setTimeout(async () => {
       try {
-        await readJson(await fetch('/api/graph', {
+        const response = await fetch('/api/graph', {
           method: 'PUT', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ projectId, nodes: Object.values(graph.nodesById), relationships: Object.values(graph.edgesById) })
-        }));
+          body: JSON.stringify({ projectId, baseVersion: graphVersionRef.current, nodes: Object.values(graph.nodesById), relationships: Object.values(graph.edgesById) })
+        });
+        if (response.status === 409) { await mergeWithCloud(); return; }
+        const { version } = await readJson<{ version: number }>(response);
+        markSynced({ version, nodes: Object.values(graph.nodesById), relationships: Object.values(graph.edgesById) });
+        mergeRetries.current = 0;
         setSaveState('saved');
         const now = Date.now();
         if (!fromTeammate && now - lastRevisionTime.current > 120_000) {
@@ -645,7 +700,31 @@ export default function SynthexWorkspace() {
       }
     }, fromTeammate ? 1500 + Math.round(Math.random() * 1000) : 450);
     return () => clearTimeout(timer);
-  }, [graph, projectId, loadedProject, loading, announce]);
+  }, [graph, projectId, loadedProject, loading, paused, announce, mergeWithCloud, markSynced]);
+
+  const resolveConflict = useCallback((conflictId: string, choice: ResolutionChoice) => {
+    const conflict = conflicts.find(item => item.id === conflictId);
+    if (!conflict) return;
+    if (conflict.kind === 'title') {
+      if (choice === 'cloud') void renameProject(projectId, conflict.remote as string);
+    } else if (conflict.kind !== 'project') { // map-level conflicts only come from the desktop sync engine
+      let next: GraphSnapshot;
+      try {
+        next = applyResolution(toSnapshot(graphRef.current, projectTitleRef.current), conflict, choice, newId);
+      } catch (error) {
+        announce(error instanceof Error ? error.message : 'Could not apply that choice.');
+        return;
+      }
+      // An edge whose note is gone is left out; say so rather than lose it silently.
+      const wanted = choice === 'delete' ? [] : conflict.kind === 'edge' ? [conflict.itemId] : (conflict.edges ?? []).map(edge => edge.id);
+      const lost = wanted.filter(id => !next.relationships.some(edge => edge.id === id)).length;
+      if (lost) announce(`${plural(lost, 'link')} left out: a note it joins is no longer on the map.`);
+      updateGraph(() => normalizeGraph(next.nodes, next.relationships));
+    }
+    const remaining = conflicts.filter(item => item.id !== conflictId);
+    setConflicts(remaining);
+    if (!remaining.length) setConflictPanelOpen(false);
+  }, [conflicts, projectId, announce, renameProject, updateGraph]);
 
   const deleteNodes = useCallback((ids: string[]) => {
     if (ids.length === 0) return;
@@ -701,6 +780,7 @@ export default function SynthexWorkspace() {
   const edges = useMemo(() => Object.values(graph.edgesById), [graph]);
   const selectedNode = selectedIds.length === 1 ? graph.nodesById[selectedIds[0]] : undefined;
   const project = projects.find(item => item.id === projectId) ?? personalProjects.find(item => item.id === projectId);
+  projectTitleRef.current = project?.title ?? '';
 
 
   // Draft layer: the newest research run with undecided changes sits on the board in proof blue.
@@ -994,10 +1074,11 @@ export default function SynthexWorkspace() {
   }, false);
 
   const reloadGraph = useCallback(async () => {
-    const data = await readJson<{ nodes: CanvasNode[]; relationships: Connection[] }>(await fetch(`/api/graph?projectId=${encodeURIComponent(projectId)}`, { cache: 'no-store' }));
+    const data = await readJson<GraphResponse>(await fetch(`/api/graph?projectId=${encodeURIComponent(projectId)}`, { cache: 'no-store' }));
+    markSynced(data);
     setGraph(normalizeGraph(adoptLegacyClusterMembers(data.nodes), data.relationships));
     setCanvasFitKey(value => value + 1);
-  }, [projectId]);
+  }, [projectId, markSynced]);
 
   const reloadHistory = useCallback(async () => {
     const data = await readJson<{ sessions: ResearchSession[] }>(await fetch(`/api/research?projectId=${encodeURIComponent(projectId)}`, { cache: 'no-store' }));
@@ -1983,7 +2064,9 @@ export default function SynthexWorkspace() {
               )}
             </div>
 
-            <span className={`topbar-save ${saveState}`} role="status">{saveState === 'saving' ? 'Saving…' : saveState === 'error' ? 'Not saved' : 'Saved'}</span>
+            {conflicts.length > 0
+              ? <button type="button" className="topbar-conflicts" onClick={() => setConflictPanelOpen(true)}>{`${conflicts.length} conflict${conflicts.length === 1 ? '' : 's'} need your decision`}</button>
+              : <span className={`topbar-save ${saveState}`} role="status">{saveState === 'saving' ? 'Saving…' : saveState === 'error' ? 'Not saved' : 'Saved'}</span>}
           </div>
 
           <div className="topbar-center">
@@ -2394,6 +2477,8 @@ export default function SynthexWorkspace() {
           <div className="review-footer"><span className="note-meta">{plural(activeSession.changes.filter(change => change.status === 'pending').length, 'draft')} left to decide</span><div><button className="line-button" disabled={!activeSession.changes.some(change => change.status === 'pending')} onClick={() => setReviewDecisions(Object.fromEntries(activeSession.changes.filter(change => change.status === 'pending').map(change => [change.id, 'accepted'] as const)))}>Keep all</button><button className="ink-button" disabled={!Object.keys(reviewDecisions).length} onClick={() => saveReview(activeSession, Object.entries(reviewDecisions).map(([changeId, status]) => ({ changeId, status })))}>Save decisions</button></div></div>
         </section>
       </div>}
+
+      {conflictPanelOpen && conflicts.length > 0 && <ConflictPanel conflicts={conflicts} graph={{ nodes, relationships: edges }} onResolve={resolveConflict} onClose={() => setConflictPanelOpen(false)} />}
 
       {briefFor && <MapBriefDialog mapTitle={briefFor.title} onSave={saveBrief} onSkip={skipBrief} />}
 
