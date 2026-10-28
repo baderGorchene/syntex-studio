@@ -14,6 +14,9 @@ export interface GraphConflict {
   base?: CanvasNode | Connection | string;
   local?: CanvasNode | Connection | string;
   remote?: CanvasNode | Connection | string;
+  // Node conflicts with deleted-local/deleted-remote only: links touching the node on the side that kept it,
+  // left out of merged. Restored if the user keeps the node.
+  edges?: Connection[];
 }
 export interface MergeResult { merged: GraphSnapshot; conflicts: GraphConflict[]; dropped: string[] }
 
@@ -158,9 +161,22 @@ export function mergeGraphs(base: GraphSnapshot, local: GraphSnapshot, remote: G
     conflicts.push({ id: 'title:title', kind: 'title', itemId: 'title', reason: 'both-changed', base: base.title, local: local.title, remote: remote.title });
   }
 
+  // A delete conflict keeps the links that the kept side has on the node, so choosing "keep" loses nothing.
+  const mergedEdgeIds = new Set(relationships.map(e => e.id));
+  const parkedEdgeIds = new Set<string>();
+  for (const conflict of conflicts) {
+    if (conflict.kind !== 'node' || conflict.reason === 'both-changed') continue;
+    const keptSide = conflict.reason === 'deleted-local' ? remote : local;
+    conflict.edges = keptSide.relationships.filter(e =>
+      (e.from === conflict.itemId || e.to === conflict.itemId) && !mergedEdgeIds.has(e.id)
+    );
+    conflict.edges.forEach(e => parkedEdgeIds.add(e.id));
+  }
+  const reallyDropped = dropped.filter(id => !parkedEdgeIds.has(id));
+
   const merged = { title: title === CONFLICT ? local.title : title, nodes, relationships };
   normalizeGraph(merged.nodes, merged.relationships); // throws if the merge ever produced an invalid graph
-  return { merged, conflicts, dropped };
+  return { merged, conflicts, dropped: reallyDropped };
 }
 
 /** Same map regardless of node/edge order and object key order. */

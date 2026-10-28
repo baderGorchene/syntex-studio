@@ -91,6 +91,27 @@ test('delete vs new link conflicts on the node', () => {
   assert.ok(!result.dropped.includes('e'));
 });
 
+test('delete vs new link keeps the link on the conflict', () => {
+  const e = edge('e', 'b', 'a');
+  const base = graph([node('a'), node('b')]);
+  const result = merge(base, graph([node('b')]), graph([node('a'), node('b')], [e]));
+  assert.deepEqual(result.conflicts[0].edges, [e]);
+  assert.ok(!result.merged.relationships.some(r => r.id === 'e'));
+  assert.deepEqual(result.dropped, []);
+});
+
+test('edit vs remote delete keeps the local link on the conflict', () => {
+  // Local also deleted `b`, so `f` cannot stay in merged and is parked on the conflict instead.
+  // (With `b` alive, `f` would simply stay in merged next to the local `a`.)
+  const f = edge('f', 'a', 'b');
+  const base = graph([node('a'), node('b')]);
+  const result = merge(base, graph([node('a', { content: 'edited' })], [f]), graph([node('b')]));
+  const conflict = result.conflicts.find(c => c.id === 'node:a');
+  assert.equal(conflict.reason, 'deleted-remote');
+  assert.ok(conflict.edges.some(r => r.id === 'f'));
+  assert.ok(!result.dropped.includes('f'));
+});
+
 test('drops edges left dangling by agreed deletes', () => {
   // Both sides deleted `a` but neither removed `e`, so `e` survives the edge merge and dangles.
   const base = graph([node('a'), node('b')], [edge('e', 'b', 'a')]);
