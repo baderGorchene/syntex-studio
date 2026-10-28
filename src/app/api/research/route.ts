@@ -12,6 +12,7 @@ import { getServerAuth } from '@/lib/auth';
 import { chargeExtraForUsage, deductCredits, extraCreditsNotice, refundCredits } from '@/lib/credits';
 import { RESEARCH_INPUT_LIMITS, RESEARCH_MODE_LABELS, type CanvasNode, type Connection, type ResearchChange, type ResearchMode, type ResearchSession } from '@/types/canvas';
 import type { MeteredAction } from '@/lib/plans';
+import { EDGE_LABELS } from '@/lib/mcp/build';
 
 const MODES: Record<ResearchMode, { credit: MeteredAction; maxNodes: number; maxEdges: number; trail: string }> = {
   quick: { credit: 'quick_research', maxNodes: 6, maxEdges: 12, trail: 'Quick Single-Shot Research' },
@@ -25,10 +26,7 @@ function isResearchMode(value: unknown): value is ResearchMode {
 }
 
 const nodeTypes = new Set(['concept', 'note', 'claim', 'question', 'hypothesis', 'ai_insight']);
-const edgeLabels = new Set([
-  'related_to', 'supports', 'contradicts', 'derived_from', 'depends_on', 'example_of', 'part_of',
-  'causes', 'enables', 'similar_to', 'references', 'answers', 'challenges', 'extends', 'replaces'
-]);
+const edgeLabels = new Set(EDGE_LABELS);
 
 function buildSessionFromResearchResult(
   query: string,

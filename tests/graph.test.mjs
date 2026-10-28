@@ -1624,3 +1624,56 @@ test('prices model calls per model and date, and charges extra credits only past
   assert.equal(extraCreditsFor(USD_PER_CREDIT * 50, 1), 2);
   assert.equal(extraCreditsFor(USD_PER_CREDIT * 21, 20), 1);
 });
+
+test('builds a new map from tool input', async () => {
+  const { buildNewMap } = await import('../src/lib/mcp/build.ts');
+  const { nodes, connections, dropped } = buildNewMap(
+    [
+      { tempId: 'root', type: 'concept', title: 'Proteins' },
+      { tempId: 'enz', type: 'note', title: 'Enzymes', content: 'Speed up reactions.' },
+      { tempId: 'c1', type: 'claim', title: 'All enzymes are proteins' }
+    ],
+    [
+      { from: 'enz', to: 'root', label: 'part_of' },
+      { from: 'c1', to: 'enz', label: 'Supports' },
+      { from: 'c1', to: 'ghost', label: 'supports' }
+    ]
+  );
+  assert.equal(nodes.length, 3);
+  assert.equal(connections.length, 2);
+  assert.equal(dropped.length, 1);
+  assert.ok(nodes.every(node => Number.isFinite(node.x) && Number.isFinite(node.y) && node.metadata?.origin === 'ai'));
+  assert.equal(nodes.find(node => node.type === 'claim').metadata.claimStatus, 'unverified');
+  assert.equal(connections.find(edge => edge.label === 'supports').label, 'supports');
+  assert.doesNotThrow(() => normalizeGraph(nodes, connections));
+});
+
+test('drops duplicate tempIds and turns a source without a url into a note', async () => {
+  const { buildNewMap } = await import('../src/lib/mcp/build.ts');
+  const { nodes, dropped } = buildNewMap(
+    [
+      { tempId: 'a', type: 'source', title: 'A paper' },
+      { tempId: 'a', type: 'note', title: 'Again' },
+      { tempId: 'b', type: 'source', title: 'Site', url: 'https://example.com/x' }
+    ],
+    []
+  );
+  assert.equal(nodes.length, 2);
+  assert.equal(dropped.length, 1);
+  assert.equal(nodes.find(node => node.title === 'A paper').type, 'note');
+  assert.equal(nodes.find(node => node.title === 'Site').type, 'source');
+});
+
+test('builds a pending proposal that can link to existing nodes', async () => {
+  const { buildProposal } = await import('../src/lib/mcp/build.ts');
+  const graph = normalizeGraph([{ ...concept('a'), width: 280 }], []);
+  const { session, dropped } = buildProposal(graph, 'Add enzymes', [{ tempId: 'n1', type: 'note', title: 'Enzymes' }], [{ from: 'n1', to: 'a', label: 'part_of' }]);
+  assert.equal(dropped.length, 0);
+  assert.equal(session.mode, 'mcp');
+  assert.equal(session.status, 'review');
+  assert.equal(session.changes.length, 2);
+  assert.ok(session.changes.every(change => change.status === 'pending'));
+  const node = session.changes.find(change => change.kind === 'node').payload;
+  assert.ok(node.x > 280);
+  assert.equal(session.changes.find(change => change.kind === 'relationship').payload.to, 'a');
+});

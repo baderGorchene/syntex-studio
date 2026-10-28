@@ -44,12 +44,15 @@ function cloudUrl() {
   return require('./config.json').cloudUrl || '';
 }
 
-function freePort() {
+// A stable port keeps AI apps' MCP settings (http://127.0.0.1:47821/api/mcp) working across restarts.
+const PREFERRED_PORT = 47821;
+
+function freePort(port = PREFERRED_PORT) {
   return new Promise((resolve, reject) => {
     const server = net.createServer();
     server.unref();
-    server.on('error', reject);
-    server.listen(0, '127.0.0.1', () => {
+    server.on('error', (error) => (port ? freePort(0).then(resolve, reject) : reject(error)));
+    server.listen(port, '127.0.0.1', () => {
       const { port } = server.address();
       server.close(() => resolve(port));
     });
@@ -91,7 +94,7 @@ async function start() {
   const url = `http://127.0.0.1:${port}`;
   await waitForServer(url);
   base = url;
-  console.log(`Synthex Studio server ready on ${url}`);
+  console.log(`Synthex Studio server ready on ${url} (MCP: ${url}/api/mcp)`);
 
   // Deny every permission except clipboard writes, which the app's Copy buttons need (no clipboard reads).
   const allowed = (permission) => permission === 'clipboard-sanitized-write';

@@ -153,11 +153,21 @@ export default function SynthexWorkspace() {
   const [personalProjects, setPersonalProjects] = useState<ResearchProject[]>([]);
   const [projectId, setProjectId] = useState<string>(() => {
     if (typeof window !== 'undefined') {
+      // `/app?map=<id>` (links from AI apps over MCP) opens that map; the rest of the load picks it up from storage.
+      const linked = new URLSearchParams(window.location.search).get('map');
+      if (linked && linked.length <= 80) localStorage.setItem('synthex_active_project_id', linked);
       return localStorage.getItem('synthex_active_project_id') || '';
     }
     return '';
   });
   const [graph, setGraph] = useState<KnowledgeGraph>(blankGraph);
+  // Drop `?map=` once read, after hydration (the router would restore a URL changed during render).
+  useEffect(() => {
+    const url = new URL(window.location.href);
+    if (!url.searchParams.has('map')) return;
+    url.searchParams.delete('map');
+    window.history.replaceState(window.history.state, '', url);
+  }, []);
   const [sessions, setSessions] = useState<ResearchSession[]>([]);
   const [section, setSection] = useState<WorkspaceSection>('canvas');
   const savedLayout = useStoredPref('synthex_layout');

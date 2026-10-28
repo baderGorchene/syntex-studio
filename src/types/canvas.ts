@@ -264,12 +264,15 @@ export interface ResearchBlueprint {
  * no search. check: organize, then search whether the specifics are outdated or have better alternatives.
  */
 export type ResearchMode = 'quick' | 'deep' | 'organize' | 'check';
+/** A review session's origin: one of the research modes, or additions proposed by an AI app over MCP. */
+export type SessionMode = ResearchMode | 'mcp';
 
-export const RESEARCH_MODE_LABELS: Record<ResearchMode, string> = {
+export const RESEARCH_MODE_LABELS: Record<SessionMode, string> = {
   quick: 'Quick research',
   deep: 'Deep research',
   organize: 'Organized thinking',
-  check: 'Plan check'
+  check: 'Plan check',
+  mcp: 'From an AI app'
 };
 
 /** Longest input each mode accepts: research takes a question, organize and check take a dump of notes. */
@@ -292,7 +295,7 @@ export interface ResearchChange {
 export interface ResearchSession {
   id: string;
   query: string;
-  mode: ResearchMode;
+  mode: SessionMode;
   status: 'review' | 'complete';
   summary: string;
   trail: string[];

@@ -21,6 +21,7 @@
     "@clerk/nextjs": "^7.9.7",
     "@google-cloud/storage": "^8.2.0",
     "@hocuspocus/provider": "^4.7.0",
+    "@modelcontextprotocol/sdk": "^1.32.2",
     "@neondatabase/serverless": "^1.1.0",
     "@tiptap/core": "^3.31.4",
     "@tiptap/extension-image": "^3.31.4",
