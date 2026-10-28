@@ -9,6 +9,21 @@ const isPublicRoute = createRouteMatcher([
   '/uploads/(.*)'
 ]);
 
+// Desktop sync calls these server-to-server with `Authorization: Bearer sxd_…`; the routes authenticate the
+// device token themselves through getServerAuth(). Minting/revoking tokens (/api/device/tokens) always needs Clerk.
+const DEVICE_ROUTES = /^\/api\/(graph|upload|device\/.+)$/;
+const DEVICE_TOKEN_ADMIN = /^\/api\/device\/tokens(\/|$)/i;
+function isDeviceTokenRequest(request: NextRequest): boolean {
+  if (!request.headers.get('authorization')?.startsWith('Bearer sxd_')) return false;
+  let pathname: string;
+  try {
+    pathname = decodeURIComponent(request.nextUrl.pathname);
+  } catch {
+    return false;
+  }
+  return DEVICE_ROUTES.test(pathname) && !DEVICE_TOKEN_ADMIN.test(pathname) && !pathname.includes('..');
+}
+
 // Live collaboration connects the browser to the sync server over WebSocket; allow only that origin.
 const collabOrigin = (() => {
   try {
@@ -23,7 +38,7 @@ const collabOrigin = (() => {
 const vercelToolbar = process.env.VERCEL_ENV === 'preview';
 
 const clerkHandler = clerkMiddleware(async (auth, request) => {
-  if (!isPublicRoute(request)) {
+  if (!isPublicRoute(request) && !isDeviceTokenRequest(request)) {
     await auth.protect();
   }
 }, {

@@ -32,7 +32,7 @@ export async function POST(request: Request) {
     const projectId = typeof rawProjectId === 'string'
       ? rawProjectId.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 80) || 'default'
       : 'default';
-    if (!(await userHasProjectAccess(projectId, userId, auth.orgId, auth.clerkId))) {
+    if (!(await userHasProjectAccess(projectId, userId, auth.orgId, auth.clerkId, auth.isDevice))) {
       return NextResponse.json({ error: 'Project not found.' }, { status: 404 });
     }
 

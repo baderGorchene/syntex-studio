@@ -20,7 +20,8 @@ import type {
   ResearchSession
 } from '../types/canvas';
 import { addNode, addRelationship, normalizeGraph } from './graph.ts';
-import type { ChatMessageRecord, CreditTransaction, ResearchProject, SaveResult, UserRecord } from './db.ts';
+import { createHash, randomBytes } from 'crypto';
+import type { ChatMessageRecord, CreditTransaction, DeviceTokenRecord, ResearchProject, SaveResult, UserRecord } from './db.ts';
 
 export function isNeonConfigured(): boolean {
   return Boolean(process.env.DATABASE_URL || process.env.POSTGRES_URL || process.env.STORAGE_URL);
@@ -194,6 +195,20 @@ export async function ensureNeonSchema(): Promise<void> {
       await sql`CREATE INDEX IF NOT EXISTS idx_chat_messages_thread ON chat_messages(project_id, user_key, thread_id, created_at DESC)`;
 
       await sql`
+        CREATE TABLE IF NOT EXISTS device_tokens (
+          id VARCHAR(64) PRIMARY KEY,
+          user_id VARCHAR(64) NOT NULL,
+          token_hash CHAR(64) UNIQUE NOT NULL,
+          label VARCHAR(80) NOT NULL,
+          created_at BIGINT NOT NULL,
+          last_used_at BIGINT,
+          revoked_at BIGINT
+        )
+      `;
+
+      await sql`CREATE INDEX IF NOT EXISTS idx_device_tokens_user ON device_tokens(user_id, created_at DESC)`;
+
+      await sql`
         CREATE TABLE IF NOT EXISTS graph_revisions (
           id VARCHAR(128) PRIMARY KEY,
           project_id VARCHAR(128) NOT NULL,
@@ -354,7 +369,8 @@ export async function neonUserHasProjectAccess(
   id: string,
   userId?: string | null,
   orgId?: string | null,
-  clerkId?: string | null
+  clerkId?: string | null,
+  personalOnly = false
 ): Promise<boolean> {
   await ensureNeonSchema();
   const sql = getSql();
@@ -366,7 +382,7 @@ export async function neonUserHasProjectAccess(
       (${userId || null}::varchar IS NOT NULL AND user_id = ${userId || null}) OR
       (${clerkId || null}::varchar IS NOT NULL AND user_id = ${clerkId || null}) OR
       (${orgId || null}::varchar IS NOT NULL AND organization_id = ${orgId || null})
-    )
+    ) AND (${personalOnly}::boolean IS FALSE OR organization_id IS NULL)
     LIMIT 1
   `;
   return rows.length > 0;
@@ -1228,4 +1244,70 @@ export async function neonSaveChatMessages(messages: ChatMessageRecord[]): Promi
       ${m.provider ?? null}, ${m.model ?? null}, ${m.createdAt}
     )
   `));
+}
+
+// ============================================================================
+// Device tokens (desktop sync). Only the SHA-256 of a token is stored.
+// ============================================================================
+
+export function hashDeviceToken(token: string): string {
+  return createHash('sha256').update(token).digest('hex');
+}
+
+export function newDeviceToken(): { id: string; token: string; tokenHash: string } {
+  const token = `sxd_${randomBytes(32).toString('base64url')}`;
+  return { id: `dev-${randomBytes(12).toString('hex')}`, token, tokenHash: hashDeviceToken(token) };
+}
+
+export async function neonCreateDeviceToken(userId: string, label: string): Promise<{ id: string; token: string }> {
+  await ensureNeonSchema();
+  const sql = getSql();
+  const { id, token, tokenHash } = newDeviceToken();
+  await sql`
+    INSERT INTO device_tokens (id, user_id, token_hash, label, created_at)
+    VALUES (${id}, ${userId}, ${tokenHash}, ${label}, ${Date.now()})
+  `;
+  return { id, token };
+}
+
+export async function neonGetUserIdForDeviceToken(token: string): Promise<string | null> {
+  if (!token.startsWith('sxd_')) return null;
+  await ensureNeonSchema();
+  const sql = getSql();
+  const rows = await sql`
+    SELECT id, user_id FROM device_tokens WHERE token_hash = ${hashDeviceToken(token)} AND revoked_at IS NULL LIMIT 1
+  `;
+  if (rows.length === 0) return null;
+  try {
+    await sql`UPDATE device_tokens SET last_used_at = ${Date.now()} WHERE id = ${rows[0].id}`;
+  } catch (error) {
+    console.warn('Could not record device token use:', error);
+  }
+  return String(rows[0].user_id);
+}
+
+export async function neonListDeviceTokens(userId: string): Promise<DeviceTokenRecord[]> {
+  await ensureNeonSchema();
+  const sql = getSql();
+  const rows = await sql`
+    SELECT id, label, created_at, last_used_at FROM device_tokens
+    WHERE user_id = ${userId} AND revoked_at IS NULL ORDER BY created_at DESC
+  `;
+  return rows.map(r => ({
+    id: String(r.id),
+    label: String(r.label),
+    createdAt: Number(r.created_at),
+    lastUsedAt: r.last_used_at == null ? null : Number(r.last_used_at)
+  }));
+}
+
+export async function neonRevokeDeviceToken(id: string, userId: string): Promise<boolean> {
+  await ensureNeonSchema();
+  const sql = getSql();
+  const rows = await sql`
+    UPDATE device_tokens SET revoked_at = ${Date.now()}
+    WHERE id = ${id} AND user_id = ${userId} AND revoked_at IS NULL
+    RETURNING id
+  `;
+  return rows.length > 0;
 }

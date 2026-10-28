@@ -23,7 +23,7 @@ export async function GET(request: Request) {
     if (!auth.isLocal && !userId) return Response.json({ error: 'Unauthorized' }, { status: 401 });
 
     const projectId = requestedProject(request);
-    if (!projectId || !(await userHasProjectAccess(projectId, userId, orgId, clerkId))) {
+    if (!projectId || !(await userHasProjectAccess(projectId, userId, orgId, clerkId, auth.isDevice))) {
       return Response.json({ error: 'Project not found.' }, { status: 404 });
     }
     // Version before data. Saves bump the version atomically with the write (SQLite and Neon transactions), so a save
@@ -52,7 +52,7 @@ export async function PUT(request: Request) {
 
     const body = await request.json();
     const projectId = typeof body?.projectId === 'string' ? body.projectId : '';
-    if (!projectId || projectId.length > 80 || !(await userHasProjectAccess(projectId, userId, orgId, clerkId))) {
+    if (!projectId || projectId.length > 80 || !(await userHasProjectAccess(projectId, userId, orgId, clerkId, auth.isDevice))) {
       return Response.json({ error: 'Project not found or access denied.' }, { status: 404 });
     }
     if (!Array.isArray(body?.nodes) || !Array.isArray(body?.relationships)) {

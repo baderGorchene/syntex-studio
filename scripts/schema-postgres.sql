@@ -159,6 +159,19 @@ CREATE TABLE IF NOT EXISTS chat_messages (
 
 CREATE INDEX IF NOT EXISTS idx_chat_messages_thread ON chat_messages(project_id, user_key, thread_id, created_at DESC);
 
+-- Desktop device tokens: only the SHA-256 hex of each token is stored. Revoked rows stay for audit.
+CREATE TABLE IF NOT EXISTS device_tokens (
+    id VARCHAR(64) PRIMARY KEY,
+    user_id VARCHAR(64) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    token_hash CHAR(64) UNIQUE NOT NULL,
+    label VARCHAR(80) NOT NULL,
+    created_at BIGINT NOT NULL,
+    last_used_at BIGINT,
+    revoked_at BIGINT
+);
+
+CREATE INDEX IF NOT EXISTS idx_device_tokens_user ON device_tokens(user_id, created_at DESC);
+
 -- ----------------------------------------------------------------------------
 -- 7. Graph Revisions (Undo/Redo & Point-in-Time Checkpoints)
 -- ----------------------------------------------------------------------------

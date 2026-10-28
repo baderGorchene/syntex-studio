@@ -53,7 +53,13 @@ import {
   neonGetCreditTransactions,
   neonGetChatMessages,
   neonGetLatestChatThreadId,
-  neonSaveChatMessages
+  neonSaveChatMessages,
+  hashDeviceToken,
+  newDeviceToken,
+  neonCreateDeviceToken,
+  neonGetUserIdForDeviceToken,
+  neonListDeviceTokens,
+  neonRevokeDeviceToken
 } from './neon.ts';
 
 const require = createRequire(import.meta.url);
@@ -150,6 +156,16 @@ function ensureSchemaColumns(db: Database.Database) {
       createdAt INTEGER NOT NULL
     );
     CREATE INDEX IF NOT EXISTS chat_messages_thread_idx ON chat_messages(projectId, userKey, threadId, createdAt);
+    CREATE TABLE IF NOT EXISTS device_tokens (
+      id TEXT PRIMARY KEY,
+      userId TEXT NOT NULL,
+      tokenHash TEXT NOT NULL UNIQUE,
+      label TEXT NOT NULL,
+      createdAt INTEGER NOT NULL,
+      lastUsedAt INTEGER,
+      revokedAt INTEGER
+    );
+    CREATE INDEX IF NOT EXISTS device_tokens_user_idx ON device_tokens(userId, createdAt);
   `);
 
   const nodeColumns = [
@@ -828,10 +844,11 @@ export function userHasProjectAccess(
   id: string,
   userId?: string | null,
   orgId?: string | null,
-  clerkId?: string | null
+  clerkId?: string | null,
+  personalOnly = false  // device tokens: personal maps only, even ones the user created in a team
 ): boolean | Promise<boolean> {
   if (isNeonConfigured()) {
-    return neonUserHasProjectAccess(id, userId, orgId, clerkId);
+    return neonUserHasProjectAccess(id, userId, orgId, clerkId, personalOnly);
   }
   const db = getDatabase();
   // No identity means no access; never fall back to "project exists".
@@ -852,7 +869,7 @@ export function userHasProjectAccess(
   }
   const row = db.prepare(`
     SELECT 1 FROM projects
-    WHERE id = ? AND (${conditions.join(' OR ')})
+    WHERE id = ? AND (${conditions.join(' OR ')})${personalOnly ? ' AND organizationId IS NULL' : ''}
   `).get(...params);
   return Boolean(row);
 }
@@ -1308,6 +1325,64 @@ export function saveChatMessages(messages: ChatMessageRecord[]): void | Promise<
       });
     }
   })();
+}
+
+// Device tokens let the desktop app sync personal maps server-to-server. Only the SHA-256 of a token is stored,
+// and tokens are found by hash lookup, so no secret is ever compared as a string.
+export interface DeviceTokenRecord {
+  id: string;
+  label: string;
+  createdAt: number;
+  lastUsedAt: number | null;
+}
+
+/** Returns the plaintext token once; it is never stored or retrievable again. */
+export function createDeviceToken(userId: string, label: string): { id: string; token: string } | Promise<{ id: string; token: string }> {
+  if (isNeonConfigured()) {
+    return neonCreateDeviceToken(userId, label);
+  }
+  const { id, token, tokenHash } = newDeviceToken();
+  getDatabase().prepare(`
+    INSERT INTO device_tokens (id, userId, tokenHash, label, createdAt) VALUES (?, ?, ?, ?, ?)
+  `).run(id, userId, tokenHash, label, Date.now());
+  return { id, token };
+}
+
+/** The owning user id, or null when the token is unknown or revoked. Records lastUsedAt best-effort. */
+export function getUserIdForDeviceToken(token: string): string | null | Promise<string | null> {
+  if (isNeonConfigured()) {
+    return neonGetUserIdForDeviceToken(token);
+  }
+  if (!token.startsWith('sxd_')) return null;
+  const db = getDatabase();
+  const row = db.prepare('SELECT id, userId FROM device_tokens WHERE tokenHash = ? AND revokedAt IS NULL')
+    .get(hashDeviceToken(token)) as { id: string; userId: string } | undefined;
+  if (!row) return null;
+  try {
+    db.prepare('UPDATE device_tokens SET lastUsedAt = ? WHERE id = ?').run(Date.now(), row.id);
+  } catch (error) {
+    console.warn('Could not record device token use:', error);
+  }
+  return row.userId;
+}
+
+/** The user's active (unrevoked) devices, newest first. */
+export function listDeviceTokens(userId: string): DeviceTokenRecord[] | Promise<DeviceTokenRecord[]> {
+  if (isNeonConfigured()) {
+    return neonListDeviceTokens(userId);
+  }
+  return getDatabase().prepare(`
+    SELECT id, label, createdAt, lastUsedAt FROM device_tokens
+    WHERE userId = ? AND revokedAt IS NULL ORDER BY createdAt DESC
+  `).all(userId) as DeviceTokenRecord[];
+}
+
+export function revokeDeviceToken(id: string, userId: string): boolean | Promise<boolean> {
+  if (isNeonConfigured()) {
+    return neonRevokeDeviceToken(id, userId);
+  }
+  return getDatabase().prepare('UPDATE device_tokens SET revokedAt = ? WHERE id = ? AND userId = ? AND revokedAt IS NULL')
+    .run(Date.now(), id, userId).changes > 0;
 }
 
 export interface CreditTransaction {
