@@ -91,6 +91,12 @@ export async function POST(request: Request) {
           ? `/api/local-files/${projectId}/${fileName}`
           : `/uploads/${projectId}/${fileName}`;
 
+        if (process.env.SYNTHEX_DESKTOP === '1') {
+          // Remember files that exist only on this device so sync can upload them later.
+          const { syncStore } = await import('@/lib/sync/store');
+          syncStore.addLocalFile(relativeUrl, projectId);
+        }
+
         return NextResponse.json({
           url: relativeUrl,
           fileName: rawName,
