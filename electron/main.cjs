@@ -1,14 +1,15 @@
 /* eslint-disable @typescript-eslint/no-require-imports -- CommonJS entry for Electron's main process */
-// Electron shell for the Windows desktop app: runs the Next standalone server on loopback with
-// ELECTRON_RUN_AS_NODE and shows it in a locked-down window. Build it with scripts/desktop-prepare.mjs.
-const { app, BrowserWindow, dialog, shell } = require('electron');
-const { spawn } = require('node:child_process');
+// Electron shell for the Windows desktop app: runs the Next standalone server on loopback
+// in an Electron utility process and shows it in a locked-down window. Build it with scripts/desktop-prepare.mjs.
+const { app, BrowserWindow, dialog, session, shell, utilityProcess } = require('electron');
 const net = require('node:net');
 const path = require('node:path');
 
 const DEEP_LINK = /^synthex:\/\/connect\/?\?token=(sxd_[A-Za-z0-9_-]+)\/?$/;
 const READY_TIMEOUT_MS = 30_000;
-const CHILD_ENV_KEYS = ['PATH', 'SystemRoot', 'TEMP', 'TMP', 'APPDATA', 'LOCALAPPDATA', 'USERPROFILE', 'HOMEDRIVE', 'HOMEPATH'];
+// Windows env lookups ignore case, so HTTPS_PROXY also picks up https_proxy.
+const CHILD_ENV_KEYS = ['PATH', 'SystemRoot', 'TEMP', 'TMP', 'APPDATA', 'LOCALAPPDATA', 'USERPROFILE', 'HOMEDRIVE', 'HOMEPATH',
+  'HTTPS_PROXY', 'HTTP_PROXY', 'NO_PROXY', 'NODE_EXTRA_CA_CERTS'];
 
 let win = null;
 let child = null;
@@ -68,7 +69,6 @@ async function start() {
   for (const key of CHILD_ENV_KEYS) if (process.env[key]) env[key] = process.env[key];
   Object.assign(env, {
     NODE_ENV: 'production',
-    ELECTRON_RUN_AS_NODE: '1',
     PORT: String(port),
     HOSTNAME: '127.0.0.1', // the desktop host check accepts 127.0.0.1/localhost on PORT only
     SYNTHEX_DESKTOP: '1',
@@ -77,11 +77,12 @@ async function start() {
     SYNTHEX_CLOUD_URL: cloudUrl(),
   });
 
-  child = spawn(process.execPath, [path.join(standalone, 'server.js')], {
+  // A utility process is owned by Electron, so it dies with the app even on a hard crash.
+  child = utilityProcess.fork(path.join(standalone, 'server.js'), [], {
     cwd: standalone,
     env,
     stdio: 'inherit',
-    windowsHide: true,
+    serviceName: 'Synthex Studio server',
   });
   child.on('exit', (code) => {
     child = null;
@@ -93,6 +94,10 @@ async function start() {
   base = url;
   console.log(`Synthex Studio server ready on ${url}`);
 
+  // Deny every permission except clipboard writes, which the app's Copy buttons need (no clipboard reads).
+  const allowed = (permission) => permission === 'clipboard-sanitized-write';
+  session.defaultSession.setPermissionRequestHandler((_wc, permission, callback) => callback(allowed(permission)));
+  session.defaultSession.setPermissionCheckHandler((_wc, permission) => allowed(permission));
   win = new BrowserWindow({
     width: 1440,
     height: 900,
@@ -103,11 +108,13 @@ async function start() {
     openExternal(target);
     return { action: 'deny' };
   });
-  win.webContents.on('will-navigate', (event, target) => {
+  const stayOnOrigin = (event, target) => {
     if (sameOrigin(target)) return;
     event.preventDefault();
     openExternal(target);
-  });
+  };
+  win.webContents.on('will-navigate', stayOnOrigin);
+  win.webContents.on('will-redirect', stayOnOrigin);
   win.on('closed', () => { win = null; });
   // A link that launched the app is posted before the page loads, so its first sync status already shows it.
   if (pendingToken) {

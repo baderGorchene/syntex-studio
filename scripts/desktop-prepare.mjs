@@ -1,7 +1,7 @@
 // Builds the Next standalone server for the Electron shell (electron/main.cjs).
 // 1. `next build` with every secret blanked, so no cloud key reaches the bundle (R26).
 // 2. Copies public/ and .next/static into .next/standalone (standalone output leaves them out).
-// 3. Deletes .env* files from the standalone tree and scans it for leaked secrets.
+// 3. Keeps only the server's own files, deletes .env*, and fails on any leftover db/env file or leaked secret.
 // 4. Checks that better-sqlite3 loads under Electron's Node.
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
@@ -40,11 +40,13 @@ const build = spawnSync(process.execPath, [path.join(root, 'node_modules', 'next
   { cwd: root, env, stdio: 'inherit' });
 if (build.status !== 0) fail('next build failed.');
 
-// File tracing follows the db/upload routes' fs calls into this checkout: the dev database, uploaded media,
-// design notes and sources would otherwise ship in the installer.
-for (const p of ['canvas.db', 'canvas.db-shm', 'canvas.db-wal', 'canvas.db-journal', '.backups', 'docs', 'src', 'collab-server', path.join('public', 'uploads')]) {
-  fs.rmSync(path.join(standalone, p), { recursive: true, force: true });
+// File tracing follows the db/upload routes' fs calls into this checkout (dev database, uploaded media, design
+// notes, sources). Keep only what server.js needs; everything else at the standalone root goes.
+const KEEP_ROOT = new Set(['server.js', 'package.json', '.next', 'node_modules', 'public']);
+for (const entry of fs.readdirSync(standalone)) {
+  if (!KEEP_ROOT.has(entry)) fs.rmSync(path.join(standalone, entry), { recursive: true, force: true });
 }
+fs.rmSync(path.join(standalone, 'public', 'uploads'), { recursive: true, force: true });
 
 fs.cpSync(path.join(root, 'public'), path.join(standalone, 'public'), {
   recursive: true,
@@ -62,29 +64,32 @@ function walk(dir, out = []) {
 }
 
 // ponytail: plain string search over every output file. It catches `NAME=value`/`NAME:"value"` assignments,
-// literal secret values from the local .env* files, and Clerk/Stripe keys in client chunks; an obfuscated or
+// literal values (16+ chars) of every blanked .env* var, and Clerk/Stripe keys in client chunks; an obfuscated or
 // split secret would slip past. Upgrade to a real secret scanner (e.g. gitleaks) if the build grows more inputs.
 // `NAME: "value"` / `NAME="value"` (inlined into code) or `NAME=value` at a line start (an env file).
 const names = SECRET_NAMES.join('|');
 const assigned = new RegExp(`\\b(${names})["'\`]?\\s*[:=]\\s*["'\`][^\\s"'\`]|^\\s*(${names})\\s*=\\s*[^\\s#]`, 'm');
-const secretValues = SECRET_NAMES.map((n) => fileVars.get(n)).filter((v) => v && v.length >= 8);
+const secretValues = [...blanked].filter((n) => !KEEP.has(n)).map((n) => fileVars.get(n)).filter((v) => v && v.length >= 16);
 const stripeOrClerkKey = /\b[ps]k_(?:test|live)_[A-Za-z0-9]{10,}/;
+for (const file of [...walk(standalone), ...walk(staticDir)]) {
+  if (path.basename(file).startsWith('.env')) fs.rmSync(file);
+}
 const leaks = [];
 for (const file of [...walk(standalone), ...walk(staticDir)]) {
-  if (path.basename(file).startsWith('.env')) {
-    fs.rmSync(file);
+  const rel = path.relative(root, file);
+  if (/\.db(-wal|-shm)?$/.test(file) || path.basename(file).startsWith('.env')) {
+    leaks.push(`${rel}: database or env file in the build output`);
     continue;
   }
   const text = fs.readFileSync(file, 'latin1');
-  const rel = path.relative(root, file);
   const hit = assigned.exec(text);
   if (hit) leaks.push(`${rel}: ${hit[1] || hit[2]} is assigned a value`);
-  if (secretValues.some((v) => text.includes(v))) leaks.push(`${rel}: contains a secret value from .env*`);
+  if (secretValues.some((v) => text.includes(v))) leaks.push(`${rel}: contains a value from a local .env* file`);
   if (file.endsWith('.js') && file.includes(`${path.sep}static${path.sep}`) && stripeOrClerkKey.test(text)) {
     leaks.push(`${rel}: client chunk contains a Clerk/Stripe key`);
   }
 }
-if (leaks.length) fail(`secrets found in the build output:\n  ${[...new Set(leaks)].join('\n  ')}`);
+if (leaks.length) fail(`unsafe build output:\n  ${[...new Set(leaks)].join('\n  ')}`);
 
 // better-sqlite3 ships N-API prebuilds, which load under Electron's Node as they are, so there is nothing to
 // rebuild (and the traced copy has no sources to rebuild from). This fails loudly if that ever changes.
