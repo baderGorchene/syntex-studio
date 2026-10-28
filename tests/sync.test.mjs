@@ -4,6 +4,7 @@ import { mergeGraphs, sameGraph } from '../src/lib/sync/merge.ts';
 import { applyResolution } from '../src/lib/sync/resolve.ts';
 import { hasUnsyncedWork, syncAll, syncProject } from '../src/lib/sync/engine.ts';
 import { normalizeGraph } from '../src/lib/graph.ts';
+import { copyGraphWithNewIds } from '../src/lib/sync/copy.ts';
 import { isAllowedDesktopRequest } from '../src/lib/desktop-host.ts';
 import { canRepair, isMapReadOnly, needsUnsyncedWarning, syncLabel } from '../src/lib/sync/ui.ts';
 
@@ -696,4 +697,23 @@ test('R24: unsynced work includes local edits since the last pass', () => {
   assert.equal(hasUnsyncedWork(row({ baseGraph: null }), graph([node('a')])), true);
   assert.equal(hasUnsyncedWork(row(), null), true);
   assert.equal(hasUnsyncedWork(null, graph()), true);
+});
+
+test('copy remaps every reference', () => {
+  const g = graph([
+    node('sec', { type: 'section', title: 'Section' }),
+    node('src1', { title: 'Source', type: 'source', url: '/uploads/p/file.pdf', imageUrl: '/uploads/p/img.png' }),
+    node('c1', { title: 'Claim', sectionId: 'sec', metadata: { sourceIds: ['src1', 'https://outside'], evidence: [{ sourceId: 'src1', relation: 'supports' }, { sourceId: 'ext', relation: 'supports' }] } }),
+  ], [{ ...edge('e1', 'c1', 'src1'), metadata: { sourceId: 'src1' } }], 'Team map');
+  const before = JSON.stringify(g);
+  let n = 0;
+  const copy = copyGraphWithNewIds(g, () => `new-${++n}`);
+  assert.equal(JSON.stringify(g), before, 'input untouched');
+  const json = JSON.stringify(copy);
+  for (const old of ['sec', 'src1', 'c1', 'e1']) assert.ok(!json.includes(`"${old}"`), old);
+  assert.ok(json.includes('/uploads/p/file.pdf') && json.includes('"ext"') && json.includes('https://outside'));
+  normalizeGraph(copy.nodes, copy.relationships);
+  const c1 = copy.nodes.find(x => x.title === 'Claim');
+  assert.equal(copy.nodes.find(x => x.id === c1.sectionId).title, 'Section');
+  assert.equal(copy.title, 'Team map');
 });

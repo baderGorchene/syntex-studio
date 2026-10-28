@@ -1216,6 +1216,18 @@ export default function SynthexWorkspace() {
     setSessions(data.sessions);
   }, [projectId]);
 
+  async function makeOfflineCopy(id: string) {
+    if (conflictsBlockSwitch()) return;
+    try {
+      const data = await readJson<{ project: ResearchProject }>(await fetch('/api/projects/copy', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ projectId: id })
+      }));
+      setPersonalProjects(current => [...current, data.project]);
+      openMap(data.project.id);
+      announce('Offline copy made. Open the desktop app to sync it.');
+    } catch (error) { announce(error instanceof Error ? error.message : 'Could not make an offline copy.'); }
+  }
+
   async function createProject(event: FormEvent) {
     event.preventDefault();
     if (creatingProject || conflictsBlockSwitch()) return;
@@ -2637,6 +2649,7 @@ export default function SynthexWorkspace() {
           creating={creatingProject}
           onCreate={createProject}
           onClose={closeMapsManager}
+          onCopyOffline={sync.enabled ? undefined : id => void makeOfflineCopy(id)}
           badgeFor={sync.enabled ? mapSyncBadge(sync) : undefined}
           extraActions={sync.enabled ? mapSyncActions(sync, { onRemove: (id, title) => void removeFromDevice(id, title), onResolve: openSyncConflicts, onChanged: () => void loadProjects() }) : undefined}
         >
