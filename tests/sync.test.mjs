@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { mergeGraphs, sameGraph } from '../src/lib/sync/merge.ts';
+import { applyResolution } from '../src/lib/sync/resolve.ts';
 import { normalizeGraph } from '../src/lib/graph.ts';
 
 const node = (id, extra = {}) => ({ id, type: 'note', x: 0, y: 0, title: id, createdAt: 1, ...extra });
@@ -136,4 +137,68 @@ test('sameGraph ignores order', () => {
   );
   assert.ok(sameGraph(a, b));
   assert.ok(!sameGraph(a, graph([node('a'), node('b')], a.relationships)));
+});
+
+const touches = (g, id) => g.relationships.filter(r => r.from === id || r.to === id);
+
+test('resolve mine/cloud/both', () => {
+  const base = graph([node('a', { content: 'base' }), node('b')], [edge('e', 'a', 'b')]);
+  const local = graph([node('a', { content: 'local' }), node('b')], [edge('e', 'a', 'b')]);
+  const remote = graph([node('a', { content: 'remote' }), node('b')], [edge('e', 'a', 'b')]);
+  const { merged, conflicts } = merge(base, local, remote);
+  const conflict = conflicts[0];
+
+  const mine = applyResolution(merged, conflict, 'mine', () => 'x');
+  assert.equal(mine.nodes.find(n => n.id === 'a').content, 'local');
+  const cloud = applyResolution(merged, conflict, 'cloud', () => 'x');
+  assert.equal(cloud.nodes.find(n => n.id === 'a').content, 'remote');
+  assert.equal(cloud.relationships.length, 1);
+
+  const both = applyResolution(merged, conflict, 'both', () => 'copy1');
+  assert.equal(both.nodes.find(n => n.id === 'a').content, 'local');
+  const copy = both.nodes.find(n => n.id === 'copy1');
+  assert.ok(copy.title.endsWith(' (conflict copy)'));
+  assert.equal(copy.content, 'remote');
+  assert.deepEqual(touches(both, 'copy1'), []);
+});
+
+test('resolve keep restores a deleted node', () => {
+  const base = graph([node('a')]);
+  const { merged, conflicts } = merge(base, graph([]), graph([node('a', { content: 'edited' })]));
+  const kept = applyResolution(merged, conflicts[0], 'keep', () => 'x');
+  assert.equal(kept.nodes.find(n => n.id === 'a').content, 'edited');
+  const gone = applyResolution(merged, conflicts[0], 'delete', () => 'x');
+  assert.equal(gone.nodes.find(n => n.id === 'a'), undefined);
+});
+
+test('resolve keep restores the node\'s links', () => {
+  const base = graph([node('a'), node('b')]);
+  const { merged, conflicts } = merge(base, graph([node('b')]), graph([node('a'), node('b')], [edge('e', 'b', 'a')]));
+  const kept = applyResolution(merged, conflicts[0], 'keep', () => 'x');
+  normalizeGraph(kept.nodes, kept.relationships);
+  assert.deepEqual(kept.relationships.map(r => r.id), ['e']);
+});
+
+test('resolve delete removes the node\'s links', () => {
+  const f = edge('f', 'a', 'b');
+  const base = graph([node('a'), node('b')]);
+  const local = graph([node('a', { content: 'edited' }), node('b')], [f]);
+  const { merged, conflicts } = merge(base, local, graph([node('b')]));
+  assert.equal(touches(merged, 'a').length, 1);
+  const gone = applyResolution(merged, conflicts.find(c => c.id === 'node:a'), 'delete', () => 'x');
+  assert.equal(gone.nodes.find(n => n.id === 'a'), undefined);
+  assert.deepEqual(touches(gone, 'a'), []);
+});
+
+test('invalid choice throws', () => {
+  const both = merge(graph([node('a', { content: 'b' })]), graph([node('a', { content: 'l' })]), graph([node('a', { content: 'r' })]));
+  assert.throws(() => applyResolution(both.merged, both.conflicts[0], 'keep', () => 'x'));
+  const del = merge(graph([node('a')]), graph([]), graph([node('a', { content: 'edited' })]));
+  assert.throws(() => applyResolution(del.merged, del.conflicts[0], 'mine', () => 'x'));
+  assert.throws(() => applyResolution(del.merged, del.conflicts[0], 'cloud', () => 'x'));
+  const title = merge(graph([], [], 'B'), graph([], [], 'L'), graph([], [], 'R'));
+  assert.throws(() => applyResolution(title.merged, title.conflicts[0], 'both', () => 'x'));
+  assert.equal(applyResolution(title.merged, title.conflicts[0], 'cloud', () => 'x').title, 'R');
+  const project = { id: 'project:p', kind: 'project', itemId: 'p', reason: 'deleted-remote' };
+  assert.throws(() => applyResolution(graph(), project, 'keep', () => 'x'));
 });

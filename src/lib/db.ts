@@ -32,6 +32,7 @@ import {
   neonGetAllConnections,
   neonSaveConnection,
   neonBulkSaveCanvas,
+  neonGetGraphVersion,
   neonGetResearchSessions,
   neonGetResearchSession,
   neonSaveResearchSession,
@@ -227,7 +228,8 @@ function ensureSchemaColumns(db: Database.Database) {
   `);
   const projectColumns = [
     { name: 'userId', type: 'TEXT' },
-    { name: 'organizationId', type: 'TEXT' }
+    { name: 'organizationId', type: 'TEXT' },
+    { name: 'graphVersion', type: 'INTEGER NOT NULL DEFAULT 0' }
   ];
   for (const col of projectColumns) {
     try {
@@ -569,12 +571,35 @@ export function saveConnectionToDb(conn: Connection, projectId = 'default'): voi
   );
 }
 
-export function bulkSaveCanvasToDb(nodes: CanvasNode[], connections: Connection[], projectId = 'default'): void | Promise<void> {
+export type SaveResult = { saved: true; version: number } | { saved: false; version: number };
+
+function readGraphVersion(db: Database.Database, projectId: string): number {
+  const row = db.prepare('SELECT graphVersion FROM projects WHERE id = ?').get(projectId) as { graphVersion: number } | undefined;
+  return row?.graphVersion ?? 0;
+}
+
+function bumpGraphVersion(db: Database.Database, projectId: string): number {
+  db.prepare('UPDATE projects SET graphVersion = graphVersion + 1 WHERE id = ?').run(projectId);
+  return readGraphVersion(db, projectId);
+}
+
+export function getGraphVersion(projectId: string): number | Promise<number> {
   if (isNeonConfigured()) {
-    return neonBulkSaveCanvas(nodes, connections, projectId);
+    return neonGetGraphVersion(projectId);
+  }
+  return readGraphVersion(getDatabase(), projectId);
+}
+
+/** Replaces the project's graph and bumps its version. With `baseVersion`, refuses (writes nothing) if the map moved on. */
+export function bulkSaveCanvasToDb(nodes: CanvasNode[], connections: Connection[], projectId = 'default', baseVersion?: number): SaveResult | Promise<SaveResult> {
+  if (isNeonConfigured()) {
+    return neonBulkSaveCanvas(nodes, connections, projectId, baseVersion);
   }
   const db = getDatabase();
-  const sync = db.transaction(() => {
+  const sync = db.transaction((): SaveResult => {
+    const current = readGraphVersion(db, projectId);
+    if (baseVersion !== undefined && baseVersion !== current) return { saved: false, version: current };
+
     db.prepare('DELETE FROM nodes WHERE projectId = ?').run(projectId);
     db.prepare('DELETE FROM connections WHERE projectId = ?').run(projectId);
 
@@ -584,9 +609,10 @@ export function bulkSaveCanvasToDb(nodes: CanvasNode[], connections: Connection[
     for (const conn of connections) {
       saveConnectionToDb(conn, projectId);
     }
+    return { saved: true, version: bumpGraphVersion(db, projectId) };
   });
 
-  sync();
+  return sync();
 }
 
 interface DbResearchSessionRow {
@@ -687,6 +713,7 @@ export function reviewResearchSession(
   const commit = db.transaction(() => {
     for (const change of accepted.filter(item => item.kind === 'node')) saveNodeToDb(change.payload as CanvasNode, projectId);
     for (const change of accepted.filter(item => item.kind === 'relationship')) saveConnectionToDb(change.payload as Connection, projectId);
+    if (accepted.length) bumpGraphVersion(db, projectId);
     db.prepare(`
       UPDATE research_sessions SET status = @status, changes = @changes WHERE id = @id AND projectId = @projectId
     `).run({ id, projectId, status: updated.status, changes: JSON.stringify(updated.changes) });

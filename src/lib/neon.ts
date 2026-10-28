@@ -20,7 +20,7 @@ import type {
   ResearchSession
 } from '../types/canvas';
 import { addNode, addRelationship, normalizeGraph } from './graph.ts';
-import type { ChatMessageRecord, CreditTransaction, ResearchProject, UserRecord } from './db.ts';
+import type { ChatMessageRecord, CreditTransaction, ResearchProject, SaveResult, UserRecord } from './db.ts';
 
 export function isNeonConfigured(): boolean {
   return Boolean(process.env.DATABASE_URL || process.env.POSTGRES_URL || process.env.STORAGE_URL);
@@ -93,9 +93,11 @@ export async function ensureNeonSchema(): Promise<void> {
           title VARCHAR(255) NOT NULL,
           user_id VARCHAR(128),
           organization_id VARCHAR(128),
-          created_at BIGINT NOT NULL
+          created_at BIGINT NOT NULL,
+          graph_version INTEGER NOT NULL DEFAULT 0
         )
       `;
+      await sql`ALTER TABLE projects ADD COLUMN IF NOT EXISTS graph_version INTEGER NOT NULL DEFAULT 0`;
 
       await sql`CREATE INDEX IF NOT EXISTS idx_projects_user_id ON projects(user_id)`;
 
@@ -593,13 +595,32 @@ export async function neonSaveConnection(conn: Connection, projectId = 'default'
   `;
 }
 
+export async function neonGetGraphVersion(projectId: string): Promise<number> {
+  await ensureNeonSchema();
+  const sql = getSql();
+  const rows = await sql`SELECT graph_version FROM projects WHERE id = ${projectId}`;
+  return Number(rows[0]?.graph_version ?? 0);
+}
+
 export async function neonBulkSaveCanvas(
   nodes: CanvasNode[],
   connections: Connection[],
-  projectId = 'default'
-): Promise<void> {
+  projectId = 'default',
+  baseVersion?: number
+): Promise<SaveResult> {
   await ensureNeonSchema();
   const sql = getSql();
+
+  // ponytail: the version bump and the graph write are separate HTTP statements, not one transaction.
+  // A failed write leaves a bumped version, which only costs the next saver a harmless extra merge.
+  // Upgrade path: a Neon transaction (sql.transaction) if that ever matters.
+  const bumped = await sql`
+    UPDATE projects SET graph_version = graph_version + 1
+    WHERE id = ${projectId} AND (${baseVersion ?? null}::int IS NULL OR graph_version = ${baseVersion ?? null}::int)
+    RETURNING graph_version
+  `;
+  if (!bumped.length) return { saved: false, version: await neonGetGraphVersion(projectId) };
+  const version = Number(bumped[0].graph_version);
 
   // Clear existing nodes and connections for the project
   await sql`DELETE FROM nodes WHERE project_id = ${projectId}`;
@@ -617,6 +638,7 @@ export async function neonBulkSaveCanvas(
     const chunk = connections.slice(i, i + chunkSize);
     await Promise.all(chunk.map(conn => neonSaveConnection(conn, projectId)));
   }
+  return { saved: true, version };
 }
 
 // ============================================================================
@@ -745,6 +767,7 @@ export async function neonReviewResearchSession(
   ]);
 
   const sql = getSql();
+  if (accepted.length) await sql`UPDATE projects SET graph_version = graph_version + 1 WHERE id = ${projectId}`;
   await sql`
     UPDATE research_sessions
     SET status = ${updated.status}, changes = ${JSON.stringify(updated.changes)}

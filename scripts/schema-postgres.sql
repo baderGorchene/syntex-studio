@@ -49,8 +49,10 @@ CREATE TABLE IF NOT EXISTS projects (
     title VARCHAR(255) NOT NULL,
     user_id VARCHAR(64) REFERENCES users(id) ON DELETE SET NULL,
     organization_id VARCHAR(128),
-    created_at BIGINT NOT NULL
+    created_at BIGINT NOT NULL,
+    graph_version INTEGER NOT NULL DEFAULT 0
 );
+ALTER TABLE projects ADD COLUMN IF NOT EXISTS graph_version INTEGER NOT NULL DEFAULT 0;
 
 CREATE INDEX IF NOT EXISTS idx_projects_user_id ON projects(user_id);
 CREATE INDEX IF NOT EXISTS idx_projects_org_id ON projects(organization_id);
