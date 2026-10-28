@@ -4,6 +4,7 @@ import { mergeGraphs, sameGraph } from '../src/lib/sync/merge.ts';
 import { applyResolution } from '../src/lib/sync/resolve.ts';
 import { syncAll, syncProject } from '../src/lib/sync/engine.ts';
 import { normalizeGraph } from '../src/lib/graph.ts';
+import { isAllowedDesktopRequest } from '../src/lib/desktop-host.ts';
 
 const node = (id, extra = {}) => ({ id, type: 'note', x: 0, y: 0, title: id, createdAt: 1, ...extra });
 const edge = (id, from, to) => ({ id, from, to, label: 'supports' });
@@ -635,4 +636,27 @@ test('syncAll syncs the connected account and reports an unreachable cloud', asy
   assert.equal(offline.find(r => r.projectId === 'project-2').status, 'pending');
 
   assert.deepEqual(await syncAll(fakeStore({ rows, account: null }), cloud), rows);
+});
+
+test('desktop host check allows loopback on our port only', () => {
+  const ok = (host, origin = null, port = '3123') => isAllowedDesktopRequest(host, origin, port);
+  assert.equal(ok('127.0.0.1:3123'), true);
+  assert.equal(ok('localhost:3123'), true);
+  assert.equal(ok('localhost:3123', 'http://localhost:3123'), true);
+  assert.equal(ok('127.0.0.1:3123', 'http://127.0.0.1:3123'), true);
+  assert.equal(ok('evil.example:3123'), false);
+  assert.equal(ok('127.0.0.1.evil.example'), false);
+  assert.equal(ok('127.0.0.1.evil.example:3123'), false);
+  assert.equal(ok('127.0.0.1:3000'), false);
+  assert.equal(ok(null), false);
+  assert.equal(ok('127.0.0.1:3123', 'http://evil.example'), false);
+  assert.equal(ok('127.0.0.1:3123', 'http://127.0.0.1:3000'), false);
+  assert.equal(ok('127.0.0.1:3123', 'https://127.0.0.1:3123'), false);
+  assert.equal(ok('127.0.0.1:3123', 'null'), false);
+  // PORT unset: any port, still loopback, Origin must match the Host's port
+  const anyPort = (host, origin = null) => isAllowedDesktopRequest(host, origin, undefined);
+  assert.equal(anyPort('localhost:4567'), true);
+  assert.equal(anyPort('localhost:4567', 'http://localhost:4567'), true);
+  assert.equal(anyPort('localhost:4567', 'http://localhost:9999'), false);
+  assert.equal(anyPort('evil.example:4567'), false);
 });

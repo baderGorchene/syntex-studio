@@ -65,6 +65,10 @@ const newRow = (projectId: string, accountId: string, baseVersion: number | null
   error: null, readOnly: false, deletedLocally: false, lastSyncedAt: null
 });
 
+// R23: destroying a local copy that may hold work the cloud doesn't have needs an explicit `confirm: true`.
+const needsConfirm = (row: SyncRow | null) => !row || row.status !== 'synced' || row.baseVersion === null;
+const unsynced = () => Response.json({ error: 'This map has changes that are not in the cloud.', unsynced: true }, { status: 409 });
+
 export async function GET() {
   if (!isDesktop()) return notFound();
   try {
@@ -242,6 +246,7 @@ export async function POST(request: Request) {
         const { projectId } = input;
         if (!validId(projectId)) return bad('Choose a map to delete.');
         const row = syncStore.getRow(projectId);
+        if (needsConfirm(row) && input.confirm !== true) return unsynced();
         await deleteLocalProject(projectId);
         // Pushed before: keep a tombstone so the next sync deletes it in the cloud too.
         // Its open conflicts go with the local copy.
@@ -253,6 +258,7 @@ export async function POST(request: Request) {
       case 'remove-from-device': {
         const { projectId } = input;
         if (!validId(projectId)) return bad('Choose a map to remove.');
+        if (needsConfirm(syncStore.getRow(projectId)) && input.confirm !== true) return unsynced();
         await deleteLocalProject(projectId);
         syncStore.deleteRow(projectId);
         return Response.json({ rows: publicRows() });

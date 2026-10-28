@@ -1,5 +1,6 @@
 import { NextResponse, type NextRequest, type NextFetchEvent } from 'next/server';
 import { clerkMiddleware, createRouteMatcher } from '@clerk/nextjs/server';
+import { isAllowedDesktopRequest } from '@/lib/desktop-host';
 
 const isPublicRoute = createRouteMatcher([
   '/',
@@ -67,6 +68,11 @@ const clerkHandler = clerkMiddleware(async (auth, request) => {
 export default function middleware(req: NextRequest, event: NextFetchEvent) {
   // If Clerk is not configured in environment, permit all requests (offline dev mode)
   if (!process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY || !process.env.CLERK_SECRET_KEY) {
+    // Desktop: loopback only, so a DNS-rebound page can't drive the local API (R22).
+    if (process.env.SYNTHEX_DESKTOP === '1' &&
+      !isAllowedDesktopRequest(req.headers.get('host'), req.headers.get('origin'), process.env.PORT)) {
+      return NextResponse.json({ error: 'Forbidden.' }, { status: 403 });
+    }
     return NextResponse.next();
   }
 
