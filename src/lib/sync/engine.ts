@@ -15,12 +15,15 @@ export interface CloudClient {
   }>;
   getGraph(id: string): Promise<{ status: 200; graph: GraphSnapshot; version: number } | { status: 403 | 410 }>;
   putGraph(id: string, g: GraphSnapshot, baseVersion: number): Promise<{ status: 200; version: number } | { status: 409; version: number } | { status: 413 | 400; error: string }>;
-  upsertProject(id: string, title: string): Promise<void>;
-  deleteProject(id: string, baseVersion: number): Promise<{ status: 200 } | { status: 409; version: number }>;
+  upsertProject(id: string, title: string): Promise<{ status: 200 | 201 } | { status: 403 }>;
+  deleteProject(id: string, baseVersion: number): Promise<{ status: 200 } | { status: 409; version: number } | { status: 403 | 410 }>;
   uploadFile(projectId: string, localUrl: string): Promise<string>;   // returns cloud URL
 }
 
 const UNREACHABLE = 'Could not reach the cloud.';
+const ID_TAKEN = "This map's id is already used in the cloud.";
+// The text store.ts sets when a row's stored JSON is corrupt (kept in sync by hand: engine.ts never loads store.ts).
+const DAMAGED = 'Stored sync data is damaged.';
 const MAX_RETRIES = 3;
 const FILE_FIELDS = ['imageUrl', 'url', 'fileData'] as const;
 
@@ -38,8 +41,13 @@ function unchanged(a: GraphSnapshot, b: GraphSnapshot): boolean {
   return sameGraph(clean(a), clean(b));
 }
 
-/** Rows this account syncs now. Conflicted rows wait for the user (Task 9); lost-access rows never sync again. */
-const eligible = (row: SyncRow, userId: string) => row.accountId === userId && row.conflicts.length === 0 && row.status !== 'no-access';
+/**
+ * Rows this account syncs now. Conflicted rows wait for the user (Task 9); lost-access rows never sync again;
+ * damaged rows may have lost their conflicts list, so pushing them could push choices nobody made.
+ */
+const eligible = (row: SyncRow, userId: string) =>
+  row.accountId === userId && row.conflicts.length === 0 && row.status !== 'no-access' &&
+  !(row.status === 'error' && row.error === DAMAGED);
 
 /** Local-only files (tracked in local_files) that a node of `g` still points at. */
 function referencedLocalFiles(store: Store, projectId: string, g: GraphSnapshot): string[] {
@@ -71,10 +79,12 @@ async function syncLocked(store: Store, cloud: CloudClient, projectId: string, f
   const account = store.getAccount();
   if (!account || !eligible(row, account.userId)) return row;
 
+  // `current` follows every save, so a later failure keeps a base that already advanced.
+  let current = row;
   const save = (changes: Partial<SyncRow>): SyncRow => {
-    const next = { ...row, ...changes };
-    store.saveRow(next);
-    return next;
+    current = { ...current, ...changes };
+    store.saveRow(current);
+    return current;
   };
 
   try {
@@ -82,6 +92,9 @@ async function syncLocked(store: Store, cloud: CloudClient, projectId: string, f
       if (row.baseVersion !== null) {
         const result = await cloud.deleteProject(projectId, row.baseVersion);
         if (result.status === 409) return save({ status: 'conflicts', conflicts: [projectConflict(projectId, 'deleted-local')], error: null });
+        // Not this user's map to delete: stop syncing it, but keep the row so the app can say why.
+        if (result.status === 403) return save({ status: 'no-access', readOnly: true, deletedLocally: false, error: null });
+        // 200, or 410 (already gone in the cloud): nothing left to sync.
       }
       // ponytail: the local project is assumed gone already (deletedLocally is a tombstone); the store has no project delete.
       store.deleteRow(projectId);
@@ -93,10 +106,10 @@ async function syncLocked(store: Store, cloud: CloudClient, projectId: string, f
       let remoteTitle: string;
       let remoteVersion: number;
 
-      if (row.baseVersion === null && attempt === 0) {
+      if (current.baseVersion === null && attempt === 0) {
         const local = store.readLocalGraph(projectId);
         if (!local) return save({ status: 'error', error: 'This map is missing on this device.' });
-        await cloud.upsertProject(projectId, local.title);
+        if ((await cloud.upsertProject(projectId, local.title)).status === 403) return save({ status: 'error', error: ID_TAKEN });
         next = local;
         remoteTitle = local.title;
         remoteVersion = 0;
@@ -108,7 +121,7 @@ async function syncLocked(store: Store, cloud: CloudClient, projectId: string, f
         }
 
         // A missing base (never pushed, or damaged) merges as if both sides added everything: same → kept, different → conflict.
-        const base = row.baseGraph ?? { title: remote.graph.title, nodes: [], relationships: [] };
+        const base = current.baseGraph ?? { title: remote.graph.title, nodes: [], relationships: [] };
         // Read local only now, so read → merge → write runs with no await in between and can't lose an autosave.
         const local = store.readLocalGraph(projectId);
         if (!local || unchanged(local, base)) {
@@ -118,8 +131,13 @@ async function syncLocked(store: Store, cloud: CloudClient, projectId: string, f
         }
 
         const { merged, conflicts } = mergeGraphs(base, local, remote.graph);
+        // Local now holds the cloud's changes, so the cloud graph is the new base (R17), in the same synchronous
+        // block as the write. Otherwise a later merge would count those changes as local edits and push them back
+        // over newer cloud changes. Conflicted items keep their local side in `merged`, so a choice made against
+        // this base still diffs correctly: "mine" differs from it, "cloud" equals it.
         if (!unchanged(merged, local)) store.writeLocalGraph(projectId, merged);
-        if (conflicts.length) return save({ status: 'conflicts', conflicts, error: null });
+        save({ baseGraph: remote.graph, baseVersion: remote.version, status: conflicts.length ? 'conflicts' : 'pending', conflicts, error: null });
+        if (conflicts.length) return current;
         next = merged;
         remoteTitle = remote.graph.title;
         remoteVersion = remote.version;
@@ -146,7 +164,9 @@ async function syncLocked(store: Store, cloud: CloudClient, projectId: string, f
         }
       }
 
-      if (next.title !== remoteTitle) await cloud.upsertProject(projectId, next.title); // PUT /api/graph carries no title
+      if (next.title !== remoteTitle && (await cloud.upsertProject(projectId, next.title)).status === 403) { // PUT /api/graph carries no title
+        return save({ status: 'error', error: ID_TAKEN });
+      }
       const result = await cloud.putGraph(projectId, next, remoteVersion);
       if (result.status === 409) continue; // someone saved in between: fetch again and re-merge
       if (result.status !== 200) return save({ status: 'error', error: result.error });

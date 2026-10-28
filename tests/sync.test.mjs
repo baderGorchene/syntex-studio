@@ -252,8 +252,10 @@ function fakeCloud({ graph: g = null, version = 0, fileSync = true, ...overrides
     },
     async upsertProject(id, title) {
       state.calls.push(['upsertProject', id, title]);
-      if (state.graph) state.graph.title = title;
-      else { state.graph = graph([], [], title); state.version = 0; }
+      if (state.graph) { state.graph.title = title; return { status: 200 }; }
+      state.graph = graph([], [], title);
+      state.version = 0;
+      return { status: 201 };
     },
     async deleteProject(id, baseVersion) {
       state.calls.push(['deleteProject', id, baseVersion]);
@@ -325,9 +327,99 @@ test('stores conflicts and does not push', async () => {
   assert.equal(calls(cloud, 'putGraph').length, 0);
   assert.equal(row.status, 'conflicts');
   assert.deepEqual(row.conflicts.map(c => c.id), ['node:a']);
-  assert.equal(row.baseVersion, 1);
-  assert.ok(sameGraph(row.baseGraph, base));
+  // The merged graph (holding the cloud's side) went local, so the base moved to the cloud graph with it.
+  assert.equal(row.baseVersion, 2);
+  assert.ok(sameGraph(row.baseGraph, cloud.state.graph));
   assert.ok(store.state.graphs['project-1'].nodes.some(n => n.id === 'c'));
+});
+
+test('409 retry does not revert a teammate\'s delete', async () => {
+  const base = graph([node('a')]);
+  const { store, cloud } = synced(base, graph([node('a', { content: 'edited' })]), graph([node('a'), node('c')]), 2);
+  const realPut = cloud.putGraph;
+  let first = true;
+  cloud.putGraph = async (...args) => {
+    if (first) { // a teammate deletes c between our GET and PUT
+      first = false;
+      cloud.state.graph.nodes = cloud.state.graph.nodes.filter(n => n.id !== 'c');
+      cloud.state.version = 3;
+    }
+    return realPut(...args);
+  };
+  const row = await syncProject(store, cloud, 'project-1');
+  assert.equal(row.status, 'synced');
+  assert.deepEqual(cloud.state.graph.nodes.map(n => n.id), ['a']);
+  assert.equal(cloud.state.graph.nodes[0].content, 'edited');
+  assert.deepEqual(store.state.graphs['project-1'].nodes.map(n => n.id), ['a']);
+});
+
+test('failed push does not revert a later teammate delete', async () => {
+  const base = graph([node('a')]);
+  const { store, cloud } = synced(base, graph([node('a', { content: 'edited' })]), graph([node('a'), node('c')]), 2);
+  const realPut = cloud.putGraph;
+  cloud.putGraph = async () => { throw new Error('offline'); };
+  assert.equal((await syncProject(store, cloud, 'project-1')).status, 'error');
+
+  cloud.state.graph.nodes = cloud.state.graph.nodes.filter(n => n.id !== 'c'); // teammate deletes c
+  cloud.state.version = 3;
+  cloud.putGraph = realPut;
+  const row = await syncProject(store, cloud, 'project-1');
+  assert.equal(row.status, 'synced');
+  assert.deepEqual(cloud.state.graph.nodes.map(n => n.id), ['a']);
+  assert.equal(cloud.state.graph.nodes[0].content, 'edited');
+});
+
+test('resolving a conflict after the base moved still pushes the user\'s choice', async () => {
+  const base = graph([node('a')]);
+  const { store, cloud } = synced(base, graph([node('a', { content: 'mine' })]), graph([node('a', { content: 'theirs' }), node('b')]), 2);
+  const first = await syncProject(store, cloud, 'project-1');
+  assert.equal(first.status, 'conflicts');
+
+  // Task 9: apply the choice to the local graph and clear the row's conflicts.
+  const resolved = applyResolution(store.state.graphs['project-1'], first.conflicts[0], 'mine', () => 'x');
+  store.state.graphs['project-1'] = resolved;
+  store.saveRow({ ...first, conflicts: [], status: 'pending' });
+
+  const row = await syncProject(store, cloud, 'project-1');
+  assert.equal(row.status, 'synced');
+  assert.equal(cloud.state.graph.nodes.find(n => n.id === 'a').content, 'mine');
+  assert.ok(cloud.state.graph.nodes.some(n => n.id === 'b'));
+});
+
+test('first push to an id taken in the cloud reports it', async () => {
+  const local = graph([node('a')]);
+  const store = fakeStore({ rows: [syncRow()], graphs: { 'project-1': local } });
+  const cloud = fakeCloud({ upsertProject: async () => ({ status: 403 }) });
+  const row = await syncProject(store, cloud, 'project-1');
+  assert.equal(row.status, 'error');
+  assert.equal(row.error, "This map's id is already used in the cloud.");
+  assert.equal(row.baseVersion, null);
+  assert.equal(calls(cloud, 'putGraph').length, 0);
+  assert.ok(sameGraph(store.state.graphs['project-1'], local));
+});
+
+test('local delete of a map already gone or not ours', async () => {
+  const base = graph([node('a')]);
+  const tombstone = () => fakeStore({ rows: [syncRow({ baseGraph: base, baseVersion: 1, deletedLocally: true })] });
+
+  const gone = tombstone();
+  await syncProject(gone, fakeCloud({ deleteProject: async () => ({ status: 410 }) }), 'project-1');
+  assert.equal(gone.getRow('project-1'), null);
+
+  const denied = tombstone();
+  const row = await syncProject(denied, fakeCloud({ deleteProject: async () => ({ status: 403 }) }), 'project-1');
+  assert.equal(row.status, 'no-access');
+  assert.equal(row.readOnly, true);
+  assert.equal(row.deletedLocally, false);
+  assert.deepEqual(denied.getRow('project-1'), row);
+});
+
+test('rows with damaged sync data are left alone', async () => {
+  const damaged = syncRow({ baseGraph: graph([node('a')]), baseVersion: 1, status: 'error', error: 'Stored sync data is damaged.' });
+  const store = fakeStore({ rows: [damaged], graphs: { 'project-1': graph([node('a', { content: 'x' })]) } });
+  const cloud = fakeCloud({ graph: graph([node('a')]), version: 1 });
+  assert.deepEqual(await syncProject(store, cloud, 'project-1'), damaged);
+  assert.deepEqual(cloud.state.calls, []);
 });
 
 test('push failure keeps base and local', async () => {
