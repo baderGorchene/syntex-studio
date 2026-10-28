@@ -31,5 +31,5 @@
     ".next/dev/types/**/*.ts",
     "**/*.mts"
   ],
-  "exclude": ["node_modules", "synthex_canvas.tsx"]
+  "exclude": ["node_modules", "synthex_canvas.tsx", "dist-desktop"]
 }

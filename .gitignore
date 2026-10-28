@@ -54,3 +54,5 @@ public/uploads/*
 
 .backups/
 .impeccable/
+# desktop installer output
+/dist-desktop/
