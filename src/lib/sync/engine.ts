@@ -27,7 +27,11 @@ const DAMAGED = 'Stored sync data is damaged.';
 const MAX_RETRIES = 3;
 const FILE_FIELDS = ['imageUrl', 'url', 'fileData'] as const;
 
-const locks = new Map<string, Promise<SyncRow>>();
+// One holder per map at a time: a sync pass, or a destructive action from /api/sync (withProjectLock).
+/** The cloud no longer accepts this device's token (revoked or signed out): the desktop must reconnect. */
+export const isTokenRejected = (error: unknown) => (error as { status?: unknown } | null)?.status === 401;
+
+const locks = new Map<string, { run: Promise<unknown>; pass: boolean }>();
 
 const projectConflict = (id: string, reason: 'deleted-local' | 'deleted-remote'): GraphConflict =>
   ({ id: `project:${id}`, kind: 'project', itemId: id, reason });
@@ -181,18 +185,28 @@ async function syncLocked(store: Store, cloud: CloudClient, projectId: string, f
       return save({ baseGraph: next, baseVersion: result.version, status: 'synced', conflicts: [], error: note, lastSyncedAt: Date.now() });
     }
     return save({ status: 'error', error: 'The map kept changing in the cloud. Sync again in a moment.' });
-  } catch {
+  } catch (error) {
+    if (isTokenRejected(error)) return current; // an account problem, not this map's: GET /api/sync reports it
     return save({ status: 'error', error: UNREACHABLE });
   }
 }
 
-/** One map, under a per-map lock: a second caller gets the running sync's result. */
-export function syncProject(store: Store, cloud: CloudClient, projectId: string, fileSync?: boolean): Promise<SyncRow> {
-  const running = locks.get(projectId);
-  if (running) return running;
-  const run = syncLocked(store, cloud, projectId, fileSync).finally(() => locks.delete(projectId));
-  locks.set(projectId, run);
+/**
+ * Runs `fn` once nothing else holds this map, and holds it meanwhile. Delete, remove, set-offline and repair use it,
+ * so a running pass can't write a stale map or row back over them, and no pass starts halfway through one.
+ */
+export async function withProjectLock<T>(projectId: string, fn: () => T | Promise<T>, pass = false): Promise<T> {
+  for (let held = locks.get(projectId); held; held = locks.get(projectId)) await held.run.catch(() => {});
+  const run = (async () => fn())().finally(() => locks.delete(projectId));
+  locks.set(projectId, { run, pass });
   return run;
+}
+
+/** One map, under the per-map lock: a second caller gets the running sync's result. */
+export function syncProject(store: Store, cloud: CloudClient, projectId: string, fileSync?: boolean): Promise<SyncRow> {
+  const held = locks.get(projectId);
+  if (held?.pass) return held.run as Promise<SyncRow>;
+  return withProjectLock(projectId, () => syncLocked(store, cloud, projectId, fileSync), true);
 }
 
 /** Every map of the connected account, one after another. */
@@ -204,10 +218,14 @@ export async function syncAll(store: Store, cloud: CloudClient): Promise<SyncRow
   let fileSync: boolean;
   try {
     ({ fileSync } = await cloud.listProjects());
-  } catch {
+  } catch (error) {
+    if (isTokenRejected(error)) return store.listRows(); // the desktop must reconnect; the rows are fine
     for (const row of rows) store.saveRow({ ...row, status: 'error', error: UNREACHABLE });
     return store.listRows();
   }
-  for (const row of rows) await syncProject(store, cloud, row.projectId, fileSync);
+  for (const row of rows) {
+    // A map deleted or removed from this device meanwhile has no row left: nothing to sync.
+    await syncProject(store, cloud, row.projectId, fileSync).catch(error => { if (store.getRow(row.projectId)) throw error; });
+  }
   return store.listRows();
 }

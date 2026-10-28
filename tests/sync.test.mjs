@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { mergeGraphs, sameGraph } from '../src/lib/sync/merge.ts';
 import { applyResolution } from '../src/lib/sync/resolve.ts';
-import { hasUnsyncedWork, syncAll, syncProject } from '../src/lib/sync/engine.ts';
+import { hasUnsyncedWork, syncAll, syncProject, withProjectLock } from '../src/lib/sync/engine.ts';
 import { normalizeGraph } from '../src/lib/graph.ts';
 import { copyGraphWithNewIds } from '../src/lib/sync/copy.ts';
 import { isAllowedDesktopRequest } from '../src/lib/desktop-host.ts';
@@ -632,6 +632,40 @@ test('rows with pending conflicts are left alone', async () => {
   assert.deepEqual(cloud.state.calls, []);
 });
 
+test('destructive actions and sync passes on one map never overlap', async () => {
+  const base = graph([node('a')]);
+  const { store, cloud } = synced(base, graph([node('a', { content: 'edited' })]), graph([node('a'), node('b')]), 2);
+  const tick = () => new Promise(resolve => setImmediate(resolve));
+  let releasePass, releaseDelete;
+  const passGate = new Promise(resolve => { releasePass = resolve; });
+  const deleteGate = new Promise(resolve => { releaseDelete = resolve; });
+  const realGet = cloud.getGraph;
+  cloud.getGraph = async id => { await passGate; return realGet(id); };
+
+  const pass = syncProject(store, cloud, 'project-1');
+  let deleting = false;
+  const removed = withProjectLock('project-1', async () => {
+    deleting = true;
+    await deleteGate;
+    delete store.state.graphs['project-1'];
+    store.deleteRow('project-1');
+  });
+  await tick();
+  assert.equal(deleting, false); // waits for the running pass, so the pass can't write the map back afterwards
+  releasePass();
+  await pass;
+  await tick();
+  assert.equal(deleting, true);
+  const later = syncAll(store, cloud); // starts while the delete holds the map
+  await tick();
+  releaseDelete();
+  await removed;
+  await later;
+  assert.equal(store.state.graphs['project-1'], undefined);
+  assert.equal(store.getRow('project-1'), null);
+  assert.equal(calls(cloud, 'getGraph').length, 1); // and doesn't pull it again
+});
+
 test('an autosave during the fetch is merged, not overwritten', async () => {
   const base = graph([node('a')]);
   const { store, cloud } = synced(base, base, graph([node('a'), node('b')]), 2);
@@ -673,6 +707,19 @@ test('syncAll syncs the connected account and reports an unreachable cloud', asy
   assert.equal(offline.find(r => r.projectId === 'project-2').status, 'pending');
 
   assert.deepEqual(await syncAll(fakeStore({ rows, account: null }), cloud), rows);
+});
+
+test('a revoked device token leaves every row as it was', async () => {
+  const base = graph([node('a')]);
+  const rows = [syncRow({ baseGraph: base, baseVersion: 1, status: 'synced' })];
+  const revoked = () => { throw Object.assign(new Error('signed out'), { status: 401 }); };
+  assert.deepEqual(await syncAll(fakeStore({ rows }), fakeCloud({ listProjects: async () => revoked() })), rows);
+  const store = fakeStore({ rows, graphs: { 'project-1': graph([node('a', { content: 'edited' })]) } });
+  const row = await syncProject(store, fakeCloud({ getGraph: async () => revoked() }), 'project-1');
+  assert.equal(row.status, 'synced');
+  assert.equal(row.error ?? null, null);
+  assert.deepEqual(store.listRows(), rows);
+  assert.equal(syncLabel(rows[0], true, false, true), 'Reconnect');
 });
 
 test('desktop host check allows loopback on our port only', () => {

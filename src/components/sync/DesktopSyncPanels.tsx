@@ -158,7 +158,8 @@ export function DesktopMapsSection({ sync, localIds, onResolve, onChanged }: {
     <section className="sync-maps" aria-label="Cloud sync">
       {sync.account ? (
         <p className="sync-maps-account">
-          <span>Synced with {sync.account.email || sync.account.name || 'your account'}</span>
+          <span>{sync.needsReconnect ? 'Signed out of' : 'Synced with'} {sync.account.email || sync.account.name || 'your account'}</span>
+          {sync.needsReconnect && sync.cloudUrl && <button type="button" className="text-button" onClick={() => window.open(`${sync.cloudUrl}/desktop/connect`)}>Reconnect this desktop</button>}
           <button type="button" className="text-button" disabled={busy} onClick={() => void run({ action: 'disconnect' })}>Disconnect</button>
         </p>
       ) : sync.cloudUrl ? (

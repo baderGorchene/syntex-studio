@@ -14,6 +14,7 @@ interface Status {
   cloudUrl: string | null;
   pending: { account: { email: string | null; name: string | null } } | null;
   online: boolean;
+  needsReconnect?: boolean;
   rows: PublicRow[];
   cloudProjects: CloudProject[];
 }
@@ -156,6 +157,8 @@ export function useDesktopSync(projectId: string | null, announce: (message: str
     enabled,
     online: status.online,
     appOffline,
+    /** The cloud refused this desktop's token (revoked): the connect flow has to run again. */
+    needsReconnect: Boolean(status.account && status.needsReconnect),
     syncing,
     account: status.account,
     cloudUrl: status.cloudUrl,

@@ -3,7 +3,7 @@ import { getServerAuth } from '@/lib/auth';
 import { deleteProjectFromDb, getProjectsFromDb, projectExistsInDb } from '@/lib/db';
 import { syncGraphVectors } from '@/lib/rag/vector-store';
 import { CloudError, createCloudClient } from '@/lib/sync/cloud-client';
-import { hasUnsyncedWork, syncAll, syncProject } from '@/lib/sync/engine';
+import { hasUnsyncedWork, isTokenRejected, syncAll, syncProject, withProjectLock } from '@/lib/sync/engine';
 import { applyResolution, type ResolutionChoice } from '@/lib/sync/resolve';
 import { syncStore, type SyncAccount, type SyncRow } from '@/lib/sync/store';
 
@@ -78,6 +78,7 @@ export async function GET() {
   try {
     const account = connectedAccount();
     let online = false;
+    let needsReconnect = false; // the cloud refused the device token: offer the connect flow again
     let profile: { email: string | null; name: string | null } = { email: null, name: null };
     let cloudProjects: { id: string; title: string; version: number }[] = [];
     if (account) {
@@ -86,8 +87,8 @@ export async function GET() {
         online = true;
         profile = list.account;
         cloudProjects = list.projects;
-      } catch {
-        // offline: report it, never fail the status call
+      } catch (error) {
+        needsReconnect = isTokenRejected(error); // otherwise offline: report it, never fail the status call
       }
     }
     return Response.json({
@@ -96,6 +97,7 @@ export async function GET() {
       // A sign-in waiting for the user's yes (never the token).
       pending: pending && pending.cloudUrl === cloudUrl() ? { account: pending.account } : null,
       online,
+      needsReconnect,
       rows: publicRows(),
       cloudProjects
     });
@@ -172,19 +174,26 @@ export async function POST(request: Request) {
         if (!account) return bad('Connect to the cloud first.');
         const { projectId, offline } = input;
         if (!validId(projectId) || typeof offline !== 'boolean') return bad('Choose a map and whether to keep it offline.');
-        const row = syncStore.getRow(projectId);
-        if (row) {
-          if (row.accountId && row.accountId !== account.userId) return bad('This map belongs to another cloud account.', 409);
-          syncStore.saveRow({ ...row, offline, accountId: account.userId });
-        } else if (offline) {
-          // A cloud map not on this device yet: track it at the cloud's version with no base, and pull it.
-          const cloud = createCloudClient(account);
-          const project = (await cloud.listProjects()).projects.find(p => p.id === projectId);
-          if (!project) return bad('That map is not in the cloud.', 404);
-          if (await projectExistsInDb(projectId)) return bad('A map with that id is already on this device.', 409);
-          syncStore.saveRow(newRow(projectId, account.userId, project.version));
-          await syncProject(syncStore, cloud, projectId);
-        }
+        const cloud = createCloudClient(account);
+        // The row is read and written under the map's lock, so a running pass can't save its stale copy over it.
+        let pull = false;
+        const refused = await withProjectLock(projectId, async () => {
+          const row = syncStore.getRow(projectId);
+          if (row) {
+            if (row.accountId && row.accountId !== account.userId) return bad('This map belongs to another cloud account.', 409);
+            syncStore.saveRow({ ...row, offline, accountId: account.userId });
+          } else if (offline) {
+            // A cloud map not on this device yet: track it at the cloud's version with no base, and pull it.
+            const project = (await cloud.listProjects()).projects.find(p => p.id === projectId);
+            if (!project) return bad('That map is not in the cloud.', 404);
+            if (await projectExistsInDb(projectId)) return bad('A map with that id is already on this device.', 409);
+            syncStore.saveRow(newRow(projectId, account.userId, project.version));
+            pull = true;
+          }
+          return null;
+        });
+        if (refused) return refused;
+        if (pull) await syncProject(syncStore, cloud, projectId); // after the lock: the pass takes it itself
         return Response.json({ rows: publicRows() });
       }
 
@@ -257,32 +266,39 @@ export async function POST(request: Request) {
       case 'delete-local': {
         const { projectId } = input;
         if (!validId(projectId)) return bad('Choose a map to delete.');
-        const row = syncStore.getRow(projectId);
-        if (needsConfirm(row) && input.confirm !== true) return unsynced();
-        await deleteLocalProject(projectId);
-        // Pushed before: keep a tombstone so the next sync deletes it in the cloud too.
-        // Its open conflicts go with the local copy.
-        if (row && row.baseVersion !== null) syncStore.saveRow({ ...row, deletedLocally: true, conflicts: [], status: 'pending', error: null });
-        else syncStore.deleteRow(projectId);
-        return Response.json({ rows: publicRows() });
+        // Under the map's lock: a running pass finishes first, so it can't write the map back or re-pull it.
+        return await withProjectLock(projectId, async () => {
+          const row = syncStore.getRow(projectId);
+          if (needsConfirm(row) && input.confirm !== true) return unsynced();
+          await deleteLocalProject(projectId);
+          // Pushed before: keep a tombstone so the next sync deletes it in the cloud too.
+          // Its open conflicts go with the local copy.
+          if (row && row.baseVersion !== null) syncStore.saveRow({ ...row, deletedLocally: true, conflicts: [], status: 'pending', error: null });
+          else syncStore.deleteRow(projectId);
+          return Response.json({ rows: publicRows() });
+        });
       }
 
       case 'remove-from-device': {
         const { projectId } = input;
         if (!validId(projectId)) return bad('Choose a map to remove.');
-        if (needsConfirm(syncStore.getRow(projectId)) && input.confirm !== true) return unsynced();
-        await deleteLocalProject(projectId);
-        syncStore.deleteRow(projectId);
-        return Response.json({ rows: publicRows() });
+        return await withProjectLock(projectId, async () => {
+          if (needsConfirm(syncStore.getRow(projectId)) && input.confirm !== true) return unsynced();
+          await deleteLocalProject(projectId);
+          syncStore.deleteRow(projectId);
+          return Response.json({ rows: publicRows() });
+        });
       }
 
       case 'repair': {
         const { projectId } = input;
         if (!validId(projectId)) return bad('Choose a map to repair.');
-        const row = syncStore.getRow(projectId);
-        if (!row) return bad('That map is not synced.', 404);
-        syncStore.saveRow({ ...row, conflicts: [], error: null, baseGraph: null, status: 'pending' });
-        return Response.json({ rows: publicRows() });
+        return await withProjectLock(projectId, () => {
+          const row = syncStore.getRow(projectId);
+          if (!row) return bad('That map is not synced.', 404);
+          syncStore.saveRow({ ...row, conflicts: [], error: null, baseGraph: null, status: 'pending' });
+          return Response.json({ rows: publicRows() });
+        });
       }
 
       default:

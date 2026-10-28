@@ -3,12 +3,16 @@ import type { SyncRow } from './store.ts';
 // Pure decisions behind the desktop sync UI (type-strippable, so tests can import it).
 
 export const DAMAGED = 'Stored sync data is damaged.';
-export type SyncLabel = 'Offline' | 'Synced' | 'Syncing' | 'Conflicts' | 'Sync error';
+export type SyncLabel = 'Reconnect' | 'Offline' | 'Synced' | 'Syncing' | 'Conflicts' | 'Sync error';
 
 type RowState = Pick<SyncRow, 'status' | 'offline' | 'readOnly' | 'error'>;
 
-/** The chip's word for the open map. `appOffline`: connected, but the cloud can't be reached. */
-export function syncLabel(row: RowState | null, appOffline: boolean, syncing: boolean): SyncLabel {
+/**
+ * The chip's word for the open map. `appOffline`: connected, but the cloud can't be reached.
+ * `needsReconnect`: the cloud answered, but no longer accepts this desktop's token.
+ */
+export function syncLabel(row: RowState | null, appOffline: boolean, syncing: boolean, needsReconnect = false): SyncLabel {
+  if (needsReconnect) return 'Reconnect';
   if (appOffline) return 'Offline';
   if (syncing || row?.status === 'pending') return 'Syncing';
   if (row?.status === 'conflicts') return 'Conflicts';
