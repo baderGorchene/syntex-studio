@@ -1,6 +1,6 @@
 import { indexGraphNodes } from '@/lib/ai-service';
-import { bulkSaveCanvasToDb, getAllConnectionsFromDb, getAllNodesFromDb, userHasProjectAccess } from '@/lib/db';
-import { getServerAuth } from '@/lib/auth';
+import { bulkSaveCanvasToDb, getAllConnectionsFromDb, getAllNodesFromDb, getGraphVersion, getProjectTitle, userHasProjectAccess } from '@/lib/db';
+import { deviceProjectDenied, getServerAuth } from '@/lib/auth';
 import { normalizeGraph } from '@/lib/graph';
 import type { CanvasNodeType, CanvasNode, Connection } from '@/types/canvas';
 
@@ -23,13 +23,18 @@ export async function GET(request: Request) {
     if (!auth.isLocal && !userId) return Response.json({ error: 'Unauthorized' }, { status: 401 });
 
     const projectId = requestedProject(request);
-    if (!projectId || !(await userHasProjectAccess(projectId, userId, orgId, clerkId))) {
-      return Response.json({ error: 'Project not found.' }, { status: 404 });
+    if (!projectId) return Response.json({ error: 'Project not found.' }, { status: 404 });
+    if (!(await userHasProjectAccess(projectId, userId, orgId, clerkId, auth.isDevice))) {
+      return auth.isDevice ? deviceProjectDenied(projectId) : Response.json({ error: 'Project not found.' }, { status: 404 });
     }
+    // Version before data. Saves bump the version atomically with the write (SQLite and Neon transactions), so a save
+    // landing between these reads can only pair newer data with an older version: the next PUT gets a 409 and merges again.
+    const version = await getGraphVersion(projectId);
     const rawNodes = (await getAllNodesFromDb(projectId)) as CanvasNode[];
     const rawEdges = (await getAllConnectionsFromDb(projectId)) as Connection[];
     const graph = normalizeGraph(rawNodes, rawEdges);
-    return Response.json({ nodes: Object.values(graph.nodesById), relationships: Object.values(graph.edgesById) });
+    const title = await getProjectTitle(projectId);
+    return Response.json({ title, nodes: Object.values(graph.nodesById), relationships: Object.values(graph.edgesById), version });
   } catch (error) {
     console.error('Failed to load knowledge graph:', error);
     return Response.json({ error: 'Could not load the knowledge graph.' }, { status: 500 });
@@ -49,11 +54,16 @@ export async function PUT(request: Request) {
 
     const body = await request.json();
     const projectId = typeof body?.projectId === 'string' ? body.projectId : '';
-    if (!projectId || projectId.length > 80 || !(await userHasProjectAccess(projectId, userId, orgId, clerkId))) {
-      return Response.json({ error: 'Project not found or access denied.' }, { status: 404 });
+    if (!projectId || projectId.length > 80) return Response.json({ error: 'Project not found or access denied.' }, { status: 404 });
+    if (!(await userHasProjectAccess(projectId, userId, orgId, clerkId, auth.isDevice))) {
+      return auth.isDevice ? deviceProjectDenied(projectId) : Response.json({ error: 'Project not found or access denied.' }, { status: 404 });
     }
     if (!Array.isArray(body?.nodes) || !Array.isArray(body?.relationships)) {
       return Response.json({ error: 'Expected nodes and relationships.' }, { status: 400 });
+    }
+    const baseVersion: unknown = body.baseVersion;
+    if (baseVersion !== undefined && !(Number.isSafeInteger(baseVersion) && (baseVersion as number) >= 0)) {
+      return Response.json({ error: 'baseVersion must be a non-negative integer.' }, { status: 400 });
     }
     if (body.nodes.length > 5000 || body.relationships.length > 15000) {
       return Response.json({ error: 'Graph exceeds the current workspace limits.' }, { status: 413 });
@@ -79,9 +89,10 @@ export async function PUT(request: Request) {
     }
 
     const graph = normalizeGraph(nodes, relationships);
-    await bulkSaveCanvasToDb(Object.values(graph.nodesById), Object.values(graph.edgesById), projectId);
+    const result = await bulkSaveCanvasToDb(Object.values(graph.nodesById), Object.values(graph.edgesById), projectId, baseVersion as number | undefined);
+    if (!result.saved) return Response.json({ error: 'This map changed elsewhere.', version: result.version }, { status: 409 });
     indexGraphNodes(projectId, nodes);
-    return Response.json({ saved: true, nodeCount: nodes.length, relationshipCount: relationships.length });
+    return Response.json({ saved: true, version: result.version, nodeCount: nodes.length, relationshipCount: relationships.length });
   } catch (error) {
     const message = error instanceof Error ? error.message : '';
     if (/Duplicate|missing node|cannot point|needs an id|needs a title|finite position/i.test(message)) {

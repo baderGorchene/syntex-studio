@@ -20,7 +20,8 @@ import type {
   ResearchSession
 } from '../types/canvas';
 import { addNode, addRelationship, normalizeGraph } from './graph.ts';
-import type { ChatMessageRecord, CreditTransaction, ResearchProject, UserRecord } from './db.ts';
+import { createHash, randomBytes } from 'crypto';
+import type { ChatMessageRecord, CreditTransaction, DeviceTokenRecord, ResearchProject, SaveResult, UserRecord } from './db.ts';
 
 export function isNeonConfigured(): boolean {
   return Boolean(process.env.DATABASE_URL || process.env.POSTGRES_URL || process.env.STORAGE_URL);
@@ -93,9 +94,11 @@ export async function ensureNeonSchema(): Promise<void> {
           title VARCHAR(255) NOT NULL,
           user_id VARCHAR(128),
           organization_id VARCHAR(128),
-          created_at BIGINT NOT NULL
+          created_at BIGINT NOT NULL,
+          graph_version INTEGER NOT NULL DEFAULT 0
         )
       `;
+      await sql`ALTER TABLE projects ADD COLUMN IF NOT EXISTS graph_version INTEGER NOT NULL DEFAULT 0`;
 
       await sql`CREATE INDEX IF NOT EXISTS idx_projects_user_id ON projects(user_id)`;
 
@@ -190,6 +193,20 @@ export async function ensureNeonSchema(): Promise<void> {
       `;
 
       await sql`CREATE INDEX IF NOT EXISTS idx_chat_messages_thread ON chat_messages(project_id, user_key, thread_id, created_at DESC)`;
+
+      await sql`
+        CREATE TABLE IF NOT EXISTS device_tokens (
+          id VARCHAR(64) PRIMARY KEY,
+          user_id VARCHAR(64) NOT NULL,
+          token_hash CHAR(64) UNIQUE NOT NULL,
+          label VARCHAR(80) NOT NULL,
+          created_at BIGINT NOT NULL,
+          last_used_at BIGINT,
+          revoked_at BIGINT
+        )
+      `;
+
+      await sql`CREATE INDEX IF NOT EXISTS idx_device_tokens_user ON device_tokens(user_id, created_at DESC)`;
 
       await sql`
         CREATE TABLE IF NOT EXISTS graph_revisions (
@@ -348,11 +365,19 @@ export async function neonProjectExists(id: string): Promise<boolean> {
   return rows.length > 0;
 }
 
+export async function neonGetProjectTitle(id: string): Promise<string | null> {
+  await ensureNeonSchema();
+  const sql = getSql();
+  const rows = await sql`SELECT title FROM projects WHERE id = ${id} LIMIT 1`;
+  return rows.length ? String(rows[0].title) : null;
+}
+
 export async function neonUserHasProjectAccess(
   id: string,
   userId?: string | null,
   orgId?: string | null,
-  clerkId?: string | null
+  clerkId?: string | null,
+  personalOnly = false
 ): Promise<boolean> {
   await ensureNeonSchema();
   const sql = getSql();
@@ -364,7 +389,7 @@ export async function neonUserHasProjectAccess(
       (${userId || null}::varchar IS NOT NULL AND user_id = ${userId || null}) OR
       (${clerkId || null}::varchar IS NOT NULL AND user_id = ${clerkId || null}) OR
       (${orgId || null}::varchar IS NOT NULL AND organization_id = ${orgId || null})
-    )
+    ) AND (${personalOnly}::boolean IS FALSE OR organization_id IS NULL)
     LIMIT 1
   `;
   return rows.length > 0;
@@ -458,10 +483,16 @@ export async function neonGetAllNodes(projectId = 'default'): Promise<CanvasNode
   return rows.map(mapNeonNode);
 }
 
+type Sql = ReturnType<typeof getSql>;
+
 export async function neonSaveNode(node: CanvasNode, projectId = 'default'): Promise<void> {
   await ensureNeonSchema();
-  const sql = getSql();
-  await sql`
+  await nodeUpsert(getSql(), node, projectId);
+}
+
+/** Unawaited upsert, so it can also run inside a `sql.transaction([...])` batch. */
+function nodeUpsert(sql: Sql, node: CanvasNode, projectId: string) {
+  return sql`
     INSERT INTO nodes (
       id, project_id, type, x, y, width, height, color, title, content, items,
       image_url, caption, url, domain, description, section_id, file_data, file_name, file_size, file_type, page_count, metadata, created_at
@@ -562,8 +593,12 @@ export async function neonGetAllConnections(projectId = 'default'): Promise<Conn
 
 export async function neonSaveConnection(conn: Connection, projectId = 'default'): Promise<void> {
   await ensureNeonSchema();
-  const sql = getSql();
-  await sql`
+  await connectionUpsert(getSql(), conn, projectId);
+}
+
+/** Unawaited upsert, so it can also run inside a `sql.transaction([...])` batch. */
+function connectionUpsert(sql: Sql, conn: Connection, projectId: string) {
+  return sql`
     INSERT INTO connections (
       id, project_id, from_node, to_node, label, arrowhead, line_style, stroke_pattern, color, animated, metadata, created_at
     ) VALUES (
@@ -593,29 +628,49 @@ export async function neonSaveConnection(conn: Connection, projectId = 'default'
   `;
 }
 
+export async function neonGetGraphVersion(projectId: string): Promise<number> {
+  await ensureNeonSchema();
+  const sql = getSql();
+  const rows = await sql`SELECT graph_version FROM projects WHERE id = ${projectId}`;
+  return Number(rows[0]?.graph_version ?? 0);
+}
+
 export async function neonBulkSaveCanvas(
   nodes: CanvasNode[],
   connections: Connection[],
-  projectId = 'default'
-): Promise<void> {
+  projectId = 'default',
+  baseVersion?: number
+): Promise<SaveResult> {
   await ensureNeonSchema();
   const sql = getSql();
 
-  // Clear existing nodes and connections for the project
-  await sql`DELETE FROM nodes WHERE project_id = ${projectId}`;
-  await sql`DELETE FROM connections WHERE project_id = ${projectId}`;
-
-  // Batch insert nodes in parallel chunks
-  const chunkSize = 25;
-  for (let i = 0; i < nodes.length; i += chunkSize) {
-    const chunk = nodes.slice(i, i + chunkSize);
-    await Promise.all(chunk.map(node => neonSaveNode(node, projectId)));
-  }
-
-  // Batch insert connections in parallel chunks
-  for (let i = 0; i < connections.length; i += chunkSize) {
-    const chunk = connections.slice(i, i + chunkSize);
-    await Promise.all(chunk.map(conn => neonSaveConnection(conn, projectId)));
+  // ponytail: the whole save is one HTTP transaction (guarded bump, deletes, every insert), so its size is
+  // bounded only by the route caps (5,000 nodes / 15,000 links). Chunk into a COPY or staging table if that grows.
+  // Guard and bump are ONE statement: under READ COMMITTED a concurrent save holding the row lock makes this UPDATE
+  // re-check `graph_version = base` after it commits, so two saves from the same base can't both win. When the UPDATE
+  // matches nothing, `1 / 0` raises division_by_zero (22012) and rolls the whole batch back.
+  const base = baseVersion ?? null;
+  try {
+    const [bumped] = await sql.transaction([
+      sql`
+        WITH bumped AS (
+          UPDATE projects SET graph_version = graph_version + 1
+          WHERE id = ${projectId} AND (${base}::int IS NULL OR graph_version = ${base}::int)
+          RETURNING graph_version
+        )
+        SELECT (SELECT graph_version FROM bumped) AS graph_version, 1 / (SELECT count(*)::int FROM bumped) AS ok
+      `,
+      sql`DELETE FROM nodes WHERE project_id = ${projectId}`,
+      sql`DELETE FROM connections WHERE project_id = ${projectId}`,
+      ...nodes.map(node => nodeUpsert(sql, node, projectId)),
+      ...connections.map(conn => connectionUpsert(sql, conn, projectId))
+    ]);
+    return { saved: true, version: Number((bumped as Array<{ graph_version: number | string }>)[0].graph_version) };
+  } catch (error) {
+    if (baseVersion !== undefined && (error as { code?: string })?.code === '22012') {
+      return { saved: false, version: await neonGetGraphVersion(projectId) };
+    }
+    throw error;
   }
 }
 
@@ -738,18 +793,18 @@ export async function neonReviewResearchSession(
     changes
   };
 
-  // Commit accepted nodes and connections to database
-  await Promise.all([
-    ...accepted.filter(item => item.kind === 'node').map(item => neonSaveNode(item.payload as CanvasNode, projectId)),
-    ...accepted.filter(item => item.kind === 'relationship').map(item => neonSaveConnection(item.payload as Connection, projectId))
-  ]);
-
+  // Commit accepted nodes and connections, the version bump and the session status together.
   const sql = getSql();
-  await sql`
-    UPDATE research_sessions
-    SET status = ${updated.status}, changes = ${JSON.stringify(updated.changes)}
-    WHERE id = ${id} AND project_id = ${projectId}
-  `;
+  await sql.transaction([
+    ...accepted.filter(item => item.kind === 'node').map(item => nodeUpsert(sql, item.payload as CanvasNode, projectId)),
+    ...accepted.filter(item => item.kind === 'relationship').map(item => connectionUpsert(sql, item.payload as Connection, projectId)),
+    ...(accepted.length ? [sql`UPDATE projects SET graph_version = graph_version + 1 WHERE id = ${projectId}`] : []),
+    sql`
+      UPDATE research_sessions
+      SET status = ${updated.status}, changes = ${JSON.stringify(updated.changes)}
+      WHERE id = ${id} AND project_id = ${projectId}
+    `
+  ]);
 
   return updated;
 }
@@ -1196,4 +1251,70 @@ export async function neonSaveChatMessages(messages: ChatMessageRecord[]): Promi
       ${m.provider ?? null}, ${m.model ?? null}, ${m.createdAt}
     )
   `));
+}
+
+// ============================================================================
+// Device tokens (desktop sync). Only the SHA-256 of a token is stored.
+// ============================================================================
+
+export function hashDeviceToken(token: string): string {
+  return createHash('sha256').update(token).digest('hex');
+}
+
+export function newDeviceToken(): { id: string; token: string; tokenHash: string } {
+  const token = `sxd_${randomBytes(32).toString('base64url')}`;
+  return { id: `dev-${randomBytes(12).toString('hex')}`, token, tokenHash: hashDeviceToken(token) };
+}
+
+export async function neonCreateDeviceToken(userId: string, label: string): Promise<{ id: string; token: string }> {
+  await ensureNeonSchema();
+  const sql = getSql();
+  const { id, token, tokenHash } = newDeviceToken();
+  await sql`
+    INSERT INTO device_tokens (id, user_id, token_hash, label, created_at)
+    VALUES (${id}, ${userId}, ${tokenHash}, ${label}, ${Date.now()})
+  `;
+  return { id, token };
+}
+
+export async function neonGetUserIdForDeviceToken(token: string): Promise<string | null> {
+  if (!token.startsWith('sxd_')) return null;
+  await ensureNeonSchema();
+  const sql = getSql();
+  const rows = await sql`
+    SELECT id, user_id FROM device_tokens WHERE token_hash = ${hashDeviceToken(token)} AND revoked_at IS NULL LIMIT 1
+  `;
+  if (rows.length === 0) return null;
+  try {
+    await sql`UPDATE device_tokens SET last_used_at = ${Date.now()} WHERE id = ${rows[0].id}`;
+  } catch (error) {
+    console.warn('Could not record device token use:', error);
+  }
+  return String(rows[0].user_id);
+}
+
+export async function neonListDeviceTokens(userId: string): Promise<DeviceTokenRecord[]> {
+  await ensureNeonSchema();
+  const sql = getSql();
+  const rows = await sql`
+    SELECT id, label, created_at, last_used_at FROM device_tokens
+    WHERE user_id = ${userId} AND revoked_at IS NULL ORDER BY created_at DESC
+  `;
+  return rows.map(r => ({
+    id: String(r.id),
+    label: String(r.label),
+    createdAt: Number(r.created_at),
+    lastUsedAt: r.last_used_at == null ? null : Number(r.last_used_at)
+  }));
+}
+
+export async function neonRevokeDeviceToken(id: string, userId: string): Promise<boolean> {
+  await ensureNeonSchema();
+  const sql = getSql();
+  const rows = await sql`
+    UPDATE device_tokens SET revoked_at = ${Date.now()}
+    WHERE id = ${id} AND user_id = ${userId} AND revoked_at IS NULL
+    RETURNING id
+  `;
+  return rows.length > 0;
 }

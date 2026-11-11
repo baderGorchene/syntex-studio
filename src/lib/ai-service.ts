@@ -24,6 +24,8 @@ export interface AIStatus {
   fallbackProvider: ProviderName | null;
   fallbackModel: string | null;
   usingFallback: boolean;
+  /** The desktop app runs without AI: keys stay on the cloud server. */
+  desktop?: boolean;
   providers: {
     openai: { configured: boolean; model: string; embeddings: string };
     gemini: { configured: boolean; model: string; embeddings: string };
@@ -46,8 +48,10 @@ export function getAIStatus(): AIStatus {
   };
   const providers = { openai: openaiInfo, gemini: geminiInfo };
 
-  if (!hasOpenAI && !hasGemini) {
+  const desktop = process.env.SYNTHEX_DESKTOP === '1';
+  if (desktop || (!hasOpenAI && !hasGemini)) {
     return {
+      ...(desktop ? { desktop: true } : {}),
       configured: false,
       activeProvider: 'None',
       activeModel: 'None',

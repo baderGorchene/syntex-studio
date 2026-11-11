@@ -14,6 +14,8 @@ RUN apt-get update && apt-get install -y python3 make g++ && rm -rf /var/lib/apt
 # ------------------------------------------------------------------------------
 FROM base AS deps
 COPY package.json package-lock.json* ./
+# The cloud image never runs Electron: skip its ~100 MB binary download.
+ENV ELECTRON_SKIP_BINARY_DOWNLOAD=1
 RUN npm ci
 
 # ------------------------------------------------------------------------------

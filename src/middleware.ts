@@ -1,5 +1,6 @@
 import { NextResponse, type NextRequest, type NextFetchEvent } from 'next/server';
 import { clerkMiddleware, createRouteMatcher } from '@clerk/nextjs/server';
+import { isAllowedDesktopRequest } from '@/lib/desktop-host';
 
 const isPublicRoute = createRouteMatcher([
   '/',
@@ -8,6 +9,21 @@ const isPublicRoute = createRouteMatcher([
   '/api/webhooks(.*)',
   '/uploads/(.*)'
 ]);
+
+// Desktop sync calls these server-to-server with `Authorization: Bearer sxd_…`; the routes authenticate the
+// device token themselves through getServerAuth(). Minting/revoking tokens (/api/device/tokens) always needs Clerk.
+// Device routes must pass `auth.isDevice` as `personalOnly` to userHasProjectAccess.
+const DEVICE_ROUTES = /^\/api\/(graph|upload|device\/projects(\/[^/]+)?)$/;
+function isDeviceTokenRequest(request: NextRequest): boolean {
+  if (!request.headers.get('authorization')?.startsWith('Bearer sxd_')) return false;
+  let pathname: string;
+  try {
+    pathname = decodeURIComponent(request.nextUrl.pathname);
+  } catch {
+    return false;
+  }
+  return DEVICE_ROUTES.test(pathname) && !pathname.includes('..');
+}
 
 // Live collaboration connects the browser to the sync server over WebSocket; allow only that origin.
 const collabOrigin = (() => {
@@ -23,7 +39,7 @@ const collabOrigin = (() => {
 const vercelToolbar = process.env.VERCEL_ENV === 'preview';
 
 const clerkHandler = clerkMiddleware(async (auth, request) => {
-  if (!isPublicRoute(request)) {
+  if (!isPublicRoute(request) && !isDeviceTokenRequest(request)) {
     await auth.protect();
   }
 }, {
@@ -52,6 +68,11 @@ const clerkHandler = clerkMiddleware(async (auth, request) => {
 export default function middleware(req: NextRequest, event: NextFetchEvent) {
   // If Clerk is not configured in environment, permit all requests (offline dev mode)
   if (!process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY || !process.env.CLERK_SECRET_KEY) {
+    // Desktop: loopback only, so a DNS-rebound page can't drive the local API (R22).
+    if (process.env.SYNTHEX_DESKTOP === '1' &&
+      !isAllowedDesktopRequest(req.headers.get('host'), req.headers.get('origin'), process.env.PORT)) {
+      return NextResponse.json({ error: 'Forbidden.' }, { status: 403 });
+    }
     return NextResponse.next();
   }
 

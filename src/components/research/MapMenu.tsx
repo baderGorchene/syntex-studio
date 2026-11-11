@@ -1,7 +1,7 @@
 'use client';
 
-import { useState, type FormEvent } from 'react';
-import { Check, LayoutGrid, LoaderCircle, MoreHorizontal, Pencil, Plus, Search, Trash2, UserRound, Users, X } from 'lucide-react';
+import { useState, type FormEvent, type ReactNode } from 'react';
+import { Check, Copy, LayoutGrid, LoaderCircle, MoreHorizontal, Pencil, Plus, Search, Trash2, UserRound, Users, X } from 'lucide-react';
 import type { ResearchProject } from './WorkspaceSidebar';
 
 type RowMode = 'actions' | 'rename' | 'delete';
@@ -25,6 +25,11 @@ interface MapMenuProps {
   layout?: 'menu' | 'page';
   /** Opens the full maps manager (shown at the foot of the dropdown). */
   onManage?: () => void;
+  /** Desktop sync: a short status beside a map's name, and extra row actions. */
+  badgeFor?: (id: string) => string | null;
+  extraActions?: (project: ResearchProject) => ReactNode;
+  /** Web only: make a personal copy of a team map for the desktop app. */
+  onCopyOffline?: (id: string) => void;
 }
 
 const dateFormat = new Intl.DateTimeFormat(undefined, { day: 'numeric', month: 'short', year: 'numeric' });
@@ -32,7 +37,7 @@ const dateFormat = new Intl.DateTimeFormat(undefined, { day: 'numeric', month: '
 /** The map switcher: open, rename, move and delete maps, and create a new one (pinned at the bottom). */
 export function MapMenu({
   projects, personalProjects, activeId, workspaceKind, onOpen, onMove, onRename, onDelete,
-  newTitle, onNewTitleChange, creating, onCreate, layout = 'menu', onManage
+  newTitle, onNewTitleChange, creating, onCreate, layout = 'menu', onManage, badgeFor, extraActions, onCopyOffline
 }: MapMenuProps) {
   const isPage = layout === 'page';
   const [filter, setFilter] = useState('');
@@ -78,6 +83,7 @@ export function MapMenu({
     // Personal maps are always the user's own; in a team only the creator may move or delete a map.
     const owns = kind === 'personal' || !isTeam || Boolean(p.isOwner);
     const title = p.title || 'Untitled map';
+    const badge = badgeFor?.(p.id);
 
     if (mode === 'rename') {
       return (
@@ -116,6 +122,7 @@ export function MapMenu({
             <span className="map-menu-check" aria-hidden="true">{isOpen && <Check size={14} strokeWidth={2.25} />}</span>
             <span className="map-menu-name">{title}</span>
             {isPage && p.createdAt > 0 && <span className="map-menu-date">{dateFormat.format(p.createdAt)}</span>}
+            {badge && <span className="map-menu-badge">{badge}</span>}
             {isOpen && <span className="map-menu-badge">Open</span>}
           </button>
           <button
@@ -152,11 +159,17 @@ export function MapMenu({
                 <UserRound size={13} strokeWidth={1.75} aria-hidden="true" /> Make personal
               </button>
             )}
+            {kind === 'workspace' && isTeam && onCopyOffline && (
+              <button type="button" className="map-menu-action" title="A personal copy you can sync to the desktop app. It never merges back." onClick={() => { setRow(null); onCopyOffline(p.id); }}>
+                <Copy size={13} strokeWidth={1.75} aria-hidden="true" /> Make offline copy
+              </button>
+            )}
             {owns && (
               <button type="button" className="map-menu-action is-danger" onClick={() => setRow({ id: p.id, mode: 'delete' })}>
                 <Trash2 size={13} strokeWidth={1.75} aria-hidden="true" /> Delete
               </button>
             )}
+            {extraActions?.(p)}
             {!owns && <span className="map-menu-note">Only its creator can move or delete this map.</span>}
           </div>
         )}

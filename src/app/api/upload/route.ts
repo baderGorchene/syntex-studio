@@ -32,7 +32,7 @@ export async function POST(request: Request) {
     const projectId = typeof rawProjectId === 'string'
       ? rawProjectId.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 80) || 'default'
       : 'default';
-    if (!(await userHasProjectAccess(projectId, userId, auth.orgId, auth.clerkId))) {
+    if (!(await userHasProjectAccess(projectId, userId, auth.orgId, auth.clerkId, auth.isDevice))) {
       return NextResponse.json({ error: 'Project not found.' }, { status: 404 });
     }
 
@@ -76,14 +76,26 @@ export async function POST(request: Request) {
 
     if (!isServerless) {
       try {
-        // Local disk storage for non-serverless local development (public/uploads/{projectId})
-        const uploadsDir = path.join(process.cwd(), 'public', 'uploads', projectId);
+        // Local disk storage for non-serverless local development (public/uploads/{projectId}),
+        // or SYNTHEX_UPLOAD_DIR/{projectId} for desktop builds (served by /api/local-files)
+        const customDir = process.env.SYNTHEX_UPLOAD_DIR;
+        const uploadsDir = customDir
+          ? path.join(customDir, projectId)
+          : path.join(process.cwd(), 'public', 'uploads', projectId);
         await fs.mkdir(uploadsDir, { recursive: true });
 
         const targetFilePath = path.join(uploadsDir, fileName);
         await fs.writeFile(targetFilePath, buffer);
 
-        const relativeUrl = `/uploads/${projectId}/${fileName}`;
+        const relativeUrl = customDir
+          ? `/api/local-files/${projectId}/${fileName}`
+          : `/uploads/${projectId}/${fileName}`;
+
+        if (process.env.SYNTHEX_DESKTOP === '1') {
+          // Remember files that exist only on this device so sync can upload them later.
+          const { syncStore } = await import('@/lib/sync/store');
+          syncStore.addLocalFile(relativeUrl, projectId);
+        }
 
         return NextResponse.json({
           url: relativeUrl,
