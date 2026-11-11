@@ -1,0 +1,198 @@
+{
+  "nodes": [
+    {
+      "id": "proteins",
+      "type": "concept",
+      "title": "Types of protein",
+      "content": "Proteins grouped by what they do and by their shape.",
+      "x": 600,
+      "y": 40,
+      "createdAt": 1793189123069
+    },
+    {
+      "id": "by-function",
+      "type": "concept",
+      "title": "By function",
+      "content": "",
+      "x": 300,
+      "y": 220,
+      "createdAt": 1793189123069
+    },
+    {
+      "id": "by-shape",
+      "type": "concept",
+      "title": "By shape",
+      "content": "",
+      "x": 1000,
+      "y": 220,
+      "createdAt": 1793189123069
+    },
+    {
+      "id": "enzymes",
+      "type": "note",
+      "title": "Enzymes",
+      "content": "Speed up chemical reactions. Example: amylase, which breaks down starch.",
+      "x": 0,
+      "y": 420,
+      "createdAt": 1793189123069
+    },
+    {
+      "id": "structural",
+      "type": "note",
+      "title": "Structural",
+      "content": "Give cells and tissues strength. Examples: collagen, keratin.",
+      "x": 240,
+      "y": 420,
+      "createdAt": 1793189123069
+    },
+    {
+      "id": "transport",
+      "type": "note",
+      "title": "Transport",
+      "content": "Carry molecules around the body. Example: haemoglobin carries oxygen.",
+      "x": 480,
+      "y": 420,
+      "createdAt": 1793189123069
+    },
+    {
+      "id": "hormones",
+      "type": "note",
+      "title": "Hormones",
+      "content": "Send signals between cells. Example: insulin.",
+      "x": 0,
+      "y": 600,
+      "createdAt": 1793189123069
+    },
+    {
+      "id": "antibodies",
+      "type": "note",
+      "title": "Antibodies",
+      "content": "Recognise and fight germs as part of the immune system.",
+      "x": 240,
+      "y": 600,
+      "createdAt": 1793189123069
+    },
+    {
+      "id": "motor",
+      "type": "note",
+      "title": "Motor",
+      "content": "Make things move. Examples: actin and myosin in muscle.",
+      "x": 480,
+      "y": 600,
+      "createdAt": 1793189123069
+    },
+    {
+      "id": "fibrous",
+      "type": "note",
+      "title": "Fibrous",
+      "content": "Long and rope-like, tough and insoluble. Example: collagen.",
+      "x": 820,
+      "y": 420,
+      "createdAt": 1793189123069
+    },
+    {
+      "id": "globular",
+      "type": "note",
+      "title": "Globular",
+      "content": "Compact and round, usually water-soluble. Examples: enzymes, haemoglobin.",
+      "x": 1060,
+      "y": 420,
+      "createdAt": 1793189123069
+    },
+    {
+      "id": "membrane",
+      "type": "note",
+      "title": "Membrane",
+      "content": "Sit in cell membranes as channels, pumps and receptors.",
+      "x": 1300,
+      "y": 420,
+      "createdAt": 1793189123069
+    }
+  ],
+  "relationships": [
+    {
+      "id": "link-1",
+      "from": "proteins",
+      "to": "by-function",
+      "label": "grouped by"
+    },
+    {
+      "id": "link-2",
+      "from": "proteins",
+      "to": "by-shape",
+      "label": "grouped by"
+    },
+    {
+      "id": "link-3",
+      "from": "by-function",
+      "to": "enzymes",
+      "label": "includes"
+    },
+    {
+      "id": "link-4",
+      "from": "by-function",
+      "to": "structural",
+      "label": "includes"
+    },
+    {
+      "id": "link-5",
+      "from": "by-function",
+      "to": "transport",
+      "label": "includes"
+    },
+    {
+      "id": "link-6",
+      "from": "by-function",
+      "to": "hormones",
+      "label": "includes"
+    },
+    {
+      "id": "link-7",
+      "from": "by-function",
+      "to": "antibodies",
+      "label": "includes"
+    },
+    {
+      "id": "link-8",
+      "from": "by-function",
+      "to": "motor",
+      "label": "includes"
+    },
+    {
+      "id": "link-9",
+      "from": "by-shape",
+      "to": "fibrous",
+      "label": "includes"
+    },
+    {
+      "id": "link-10",
+      "from": "by-shape",
+      "to": "globular",
+      "label": "includes"
+    },
+    {
+      "id": "link-11",
+      "from": "by-shape",
+      "to": "membrane",
+      "label": "includes"
+    },
+    {
+      "id": "link-12",
+      "from": "structural",
+      "to": "fibrous",
+      "label": "usually"
+    },
+    {
+      "id": "link-13",
+      "from": "enzymes",
+      "to": "globular",
+      "label": "usually"
+    },
+    {
+      "id": "link-14",
+      "from": "transport",
+      "to": "globular",
+      "label": "often"
+    }
+  ]
+}

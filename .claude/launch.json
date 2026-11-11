@@ -4,8 +4,27 @@
     {
       "name": "dev",
       "runtimeExecutable": "npm",
-      "runtimeArgs": ["run", "dev"],
+      "runtimeArgs": [
+        "run",
+        "dev"
+      ],
       "port": 3000
+    },
+    {
+      "name": "dev-local",
+      "runtimeExecutable": "node",
+      "runtimeArgs": [
+        "C:\\Users\\badrg\\AppData\\Local\\Temp\\claude\\0be4d3860d531ea6\\3a6abefe-00f4-4b80-9d6b-c08231a3c138\\scratchpad\\dev-local.mjs"
+      ],
+      "port": 3100
+    },
+    {
+      "name": "neon-test",
+      "runtimeExecutable": "node",
+      "runtimeArgs": [
+        "C:\\Users\\badrg\\AppData\\Local\\Temp/claude/C--Users-badrg-OneDrive-Documents-projects-research-notes/7ab8b478-fe1b-4d11-ad12-37c16cd96c15/scratchpad/neon-test-server.mjs"
+      ],
+      "port": 3210
     }
   ]
 }

@@ -76,6 +76,13 @@ export function KnowledgeViews({
 
   const count = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
   const sourceCount = nodes.filter(node => node.type === 'source' || node.type === 'link').length;
+  // A card's sources: the evidence linked on it, plus any source card it is connected to on the map.
+  const sourceNodeIds = new Set(nodes.filter(node => node.type === 'source' || node.type === 'link').map(node => node.id));
+  const sourcesOf = (node: CanvasNode) => new Set([
+    ...(node.metadata?.evidence ?? []).map(ev => ev.sourceId),
+    ...edges.flatMap(edge => edge.from === node.id && sourceNodeIds.has(edge.to) ? [edge.to]
+      : edge.to === node.id && sourceNodeIds.has(edge.from) ? [edge.from] : [])
+  ]).size;
 
   if (section === 'history') {
     const waiting = sessions.filter(session => session.status === 'review').length;
@@ -102,7 +109,7 @@ export function KnowledgeViews({
 
   if (section === 'evidence') {
     const claims = nodes.filter(node => node.type === 'claim');
-    const withSources = claims.filter(claim => claim.metadata?.evidence?.length).length;
+    const withSources = claims.filter(claim => sourcesOf(claim) > 0).length;
     return <div className="content-view">
       <ViewHead title="Evidence paths" meta={`${count(claims.length, 'claim')} · ${withSources} with sources`} />
       {claims.length === 0 ? <EmptyView title="No claims to trace" body="Add a claim and connect it to the sources that support or challenge it." /> :
@@ -183,7 +190,7 @@ export function KnowledgeViews({
                 <td><button type="button" onClick={() => onSelectNode(node.id)}>{node.title}</button></td>
                 <td>{nodeLabel[node.type] || 'Idea'}</td>
                 <td>{node.type === 'claim' ? <ClaimStatus status={node.metadata?.claimStatus} /> : <span className="claim-status muted">Open</span>}</td>
-                <td className="num">{node.metadata?.evidence?.length || 0}</td>
+                <td className="num">{sourcesOf(node)}</td>
                 <td className="num">{edges.filter(edge => edge.from === node.id || edge.to === node.id).length}</td>
               </tr>
             ))}</tbody>

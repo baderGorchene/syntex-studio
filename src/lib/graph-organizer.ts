@@ -6,7 +6,22 @@ export interface LayoutOptions {
   startX?: number;
   startY?: number;
   columnSpacing?: number;
-  rowSpacing?: number;
+  /** Gap left under each card. */
+  rowGap?: number;
+  /** Measured card heights by node id. A card without one falls back to its saved height, then a default. */
+  heights?: Record<string, number>;
+}
+
+const DEFAULT_CARD_HEIGHT = 220;
+
+/** Stacks cards down one column by their real heights, so a tall card never covers the next one. */
+function stackColumn(nodes: CanvasNode[], x: number, startY: number, options: LayoutOptions): PositionDelta[] {
+  let y = startY;
+  return nodes.map(node => {
+    const position = { id: node.id, x: Math.round(x), y: Math.round(y) };
+    y += (options.heights?.[node.id] ?? node.height ?? DEFAULT_CARD_HEIGHT) + (options.rowGap ?? 40);
+    return position;
+  });
 }
 
 /**
@@ -23,7 +38,6 @@ export function clusterByTypeLayout(
   const startX = options.startX ?? 120;
   const startY = options.startY ?? 120;
   const colSpacing = options.columnSpacing ?? 360;
-  const rowSpacing = options.rowSpacing ?? 260;
 
   const typeColumns: Record<string, number> = {
     source: 0,
@@ -60,14 +74,7 @@ export function clusterByTypeLayout(
     // Sort alphabetically by title for deterministic, clean presentation
     nodesInCol.sort((a, b) => a.title.localeCompare(b.title));
 
-    for (let row = 0; row < nodesInCol.length; row++) {
-      const node = nodesInCol[row];
-      positions.push({
-        id: node.id,
-        x: Math.round(startX + col * colSpacing),
-        y: Math.round(startY + row * rowSpacing)
-      });
-    }
+    positions.push(...stackColumn(nodesInCol, startX + col * colSpacing, startY, options));
   }
 
   return positions;
@@ -85,7 +92,6 @@ export function hierarchicalLayout(
   const startX = options.startX ?? 120;
   const startY = options.startY ?? 120;
   const levelSpacing = options.columnSpacing ?? 380;
-  const rankSpacing = options.rowSpacing ?? 250;
 
   const nodes = Object.values(graph.nodesById);
   if (nodes.length === 0) return [];
@@ -162,13 +168,7 @@ export function hierarchicalLayout(
     const group = levelGroups.get(level)!;
     group.sort((a, b) => a.title.localeCompare(b.title));
 
-    for (let i = 0; i < group.length; i++) {
-      positions.push({
-        id: group[i].id,
-        x: Math.round(startX + level * levelSpacing),
-        y: Math.round(startY + i * rankSpacing)
-      });
-    }
+    positions.push(...stackColumn(group, startX + level * levelSpacing, startY, options));
   }
 
   return positions;
@@ -184,7 +184,6 @@ export function compactGridLayout(
   const startX = options.startX ?? 120;
   const startY = options.startY ?? 120;
   const colSpacing = options.columnSpacing ?? 340;
-  const rowSpacing = options.rowSpacing ?? 240;
 
   const nodes = Object.values(graph.nodesById);
   if (nodes.length === 0) return [];
@@ -192,14 +191,8 @@ export function compactGridLayout(
   const cols = Math.max(2, Math.ceil(Math.sqrt(nodes.length * 1.5)));
   const positions: PositionDelta[] = [];
 
-  for (let i = 0; i < nodes.length; i++) {
-    const col = i % cols;
-    const row = Math.floor(i / cols);
-    positions.push({
-      id: nodes[i].id,
-      x: Math.round(startX + col * colSpacing),
-      y: Math.round(startY + row * rowSpacing)
-    });
+  for (let col = 0; col < cols; col++) {
+    positions.push(...stackColumn(nodes.filter((_, i) => i % cols === col), startX + col * colSpacing, startY, options));
   }
 
   return positions;
@@ -210,15 +203,16 @@ export function compactGridLayout(
  */
 export function computeOrganizedLayout(
   graph: KnowledgeGraph,
-  strategy: 'cluster_by_type' | 'hierarchical' | 'compact' = 'cluster_by_type'
+  strategy: 'cluster_by_type' | 'hierarchical' | 'compact' = 'cluster_by_type',
+  options: LayoutOptions = {}
 ): PositionDelta[] {
   switch (strategy) {
     case 'hierarchical':
-      return hierarchicalLayout(graph);
+      return hierarchicalLayout(graph, options);
     case 'compact':
-      return compactGridLayout(graph);
+      return compactGridLayout(graph, options);
     case 'cluster_by_type':
     default:
-      return clusterByTypeLayout(graph);
+      return clusterByTypeLayout(graph, options);
   }
 }

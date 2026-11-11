@@ -125,6 +125,16 @@ function downloadText(filename: string, content: string, type = 'text/plain;char
 
 const plural = (count: number, singular: string, many = `${singular}s`) => `${count} ${count === 1 ? singular : many}`;
 
+/** Real heights of the cards on the board right now, so a tidy can stack them without overlap. */
+// ponytail: reads the DOM, so cards that are not rendered (folded, or tidied from another view) get the default height.
+function measuredCardHeights(): Record<string, number> {
+  const heights: Record<string, number> = {};
+  document.querySelectorAll<HTMLElement>('[data-graph-node]').forEach(el => {
+    if (el.dataset.graphNode && el.offsetHeight > 0) heights[el.dataset.graphNode] = el.offsetHeight;
+  });
+  return heights;
+}
+
 // A new note takes its title from its first line until the person names it themselves.
 function withAutoTitle(node: CanvasNode | undefined, fields: Partial<CanvasNode>): Partial<CanvasNode> {
   if (!node || node.metadata?.autoTitle !== true) return fields;
@@ -2202,7 +2212,7 @@ export default function SynthexWorkspace() {
     else if (toolId === 'attach') addToChatContext(selectedIds);
     else if (toolId === 'note') { setComposerText(''); addRecord('note', text ? { content: text } : undefined); }
     else if (toolId === 'audit') { setRightDrawerOpen(true); void executeToolDirectly('recommend_improvements'); }
-    else if (toolId === 'tidy') handleApplyLayout(computeOrganizedLayout(graphRef.current, 'cluster_by_type'));
+    else if (toolId === 'tidy') handleApplyLayout(computeOrganizedLayout(graphRef.current, 'cluster_by_type', { heights: measuredCardHeights() }));
     else if (toolId === 'chat') setRightDrawerOpen(true);
     else if (toolId === 'new') { startNewChat(); setRightDrawerOpen(true); }
   }
@@ -2231,7 +2241,7 @@ export default function SynthexWorkspace() {
           isResizeLocked={isResizeLocked}
           onToggleResizeLock={toggleResizeLock}
           onOrganizeLayout={strategy => {
-            const positions = computeOrganizedLayout(graphRef.current, strategy);
+            const positions = computeOrganizedLayout(graphRef.current, strategy, { heights: measuredCardHeights() });
             handleApplyLayout(positions);
             const strategyName = strategy === 'cluster_by_type' ? 'Grouped by type' : strategy === 'hierarchical' ? 'Top-down layout' : 'Compact grid';
             announce(`${strategyName}: moved ${plural(positions.length, 'note')}. Undo with Ctrl+Z.`);

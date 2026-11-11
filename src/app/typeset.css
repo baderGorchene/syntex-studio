@@ -720,7 +720,7 @@ button.view-row:hover { background: var(--canvas); }
 .research-trail summary svg { transition: transform 160ms cubic-bezier(.16, 1, .3, 1); }
 .research-trail ol { margin: 0 0 12px; padding-left: 22px; color: var(--muted); font-size: 13.5px; line-height: 1.5; font-variant-numeric: tabular-nums; }
 .review-changes { gap: 0; max-height: 46vh; margin-top: 8px; padding: 0; }
-.review-change { align-items: center; gap: 16px; min-height: 0; margin-top: 10px; padding: 14px 0; border: 0; border-top: 2px solid var(--proof); border-radius: 0; background: #fff; transition: border-color 200ms cubic-bezier(.16, 1, .3, 1); }
+.review-change { flex-shrink: 0; align-items: center; gap: 16px; min-height: 0; margin-top: 10px; padding: 14px 0; border: 0; border-top: 2px solid var(--proof); border-radius: 0; background: #fff; transition: border-color 200ms cubic-bezier(.16, 1, .3, 1); }
 .review-change.decision-accepted { border-top-color: var(--ink); background: #fff; }
 .review-change.decision-rejected { border-top-color: var(--line-strong); background: #fff; }
 .review-change.decision-rejected .change-copy strong { color: var(--faint); text-decoration: line-through; text-decoration-color: var(--line-strong); }
