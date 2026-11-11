@@ -37,7 +37,8 @@ const researchOutputSchema = z.object({
     type: z.enum(NODE_TYPES),
     title: z.string(),
     content: z.string(),
-    rationale: z.string().describe('Why this card belongs in the knowledge graph')
+    rationale: z.string().describe('Why this card belongs in the knowledge graph'),
+    sourceUrls: z.array(z.string()).describe('URLs from "sources" that this card draws on; empty when it rests on none')
   })),
   relationships: z.array(z.object({
     fromTempId: z.string(),
@@ -89,7 +90,7 @@ const CONTEXT_TOKEN_BUDGET = 4000;
    Sources
 ===================================================================== */
 /** Canonical form used to match a cited URL against the URLs a search actually returned. */
-function canonicalUrl(raw: string): string | null {
+export function canonicalUrl(raw: string): string | null {
   try {
     const url = new URL(raw);
     if (url.protocol !== 'https:' && url.protocol !== 'http:') return null;
@@ -275,6 +276,7 @@ const RESEARCH_RULES = `Rules:
 - A claim enters the graph as unverified until a human reviews it and links evidence; phrase claims so they can be checked.
 - Relationships connect cards by tempId and are directional. Prefer supports, contradicts, depends_on, answers, derived_from, extends.
 - Use the search tool to gather evidence. List in "sources" only pages the search returned; never write a URL from memory. Sources the search did not return are discarded.
+- In each card's "sourceUrls", give the URLs from "sources" that the card's content came from, copied exactly. Leave it empty for a card that rests on no source.
 - Emphasize contradictions, trade-offs, and empirical findings over generic background.`;
 
 const SYSTEM_PROMPT = `You are Synthex Studio's AI Research Engine. You turn research questions into structured, evidence-grounded knowledge graph proposals that a human will review.
@@ -296,7 +298,7 @@ Rules:
   - depends_on: a card (from) cannot be settled until a question or claim (to) is.
   - supports / contradicts: one statement (from) backs or conflicts with another (to).
   - answers: something the user wrote (from) already answers a question (to).
-- Leave "sources" empty.
+- Leave "sources" and every card's "sourceUrls" empty.
 - In "summary", write a short markdown outline: the goal, the main threads, and what is still unresolved.
 - In "subquestions", list the questions that most need answering, most important first.`;
 

@@ -840,17 +840,21 @@ export function GraphCanvas({
       left: Math.min(current.left, node.x),
       top: Math.min(current.top, node.y),
       right: Math.max(current.right, node.x + (node.width || 280)),
-      bottom: Math.max(current.bottom, node.y + (node.height || 150))
+      bottom: Math.max(current.bottom, node.y + (node.height || nodeHeights[node.id] || estimateNodeHeight(node)))
     }), { left: Infinity, top: Infinity, right: -Infinity, bottom: -Infinity });
     const width = Math.max(1, bounds.right - bounds.left);
     const height = Math.max(1, bounds.bottom - bounds.top);
     // On phones, fitting a whole map makes notes unreadable; keep a readable floor and let people pan.
     const phone = canvasSize.width < 600;
     const minZoom = phone ? .6 : .2;
-    const zoom = Math.max(minZoom, Math.min(.85, (canvasSize.width - 56) / width, (canvasSize.height - 110) / height));
-    // Phones keep the top clear for the draft bar and the bottom for the tool row + composer.
-    const reserveTop = phone ? 250 : 0;
-    const usableHeight = canvasSize.height - reserveTop - (phone ? 170 : 0);
+    // Keep the map clear of what floats over the board: the top bar (and the draft bar under it), the
+    // composer along the bottom, and the tool dock on the left. Phones reserve more for their tool row.
+    const reserveTop = phone ? 250 : draftIds?.size ? 140 : 80;
+    const reserveBottom = phone ? 170 : 110;
+    const usableHeight = canvasSize.height - reserveTop - reserveBottom;
+    const zoom = Math.max(minZoom, Math.min(.85,
+      (canvasSize.width - (phone ? 56 : 180)) / width,
+      (phone ? canvasSize.height - 110 : usableHeight) / height));
     setViewport({
       zoom,
       pan: {
@@ -858,7 +862,7 @@ export function GraphCanvas({
         y: reserveTop + Math.max(0, (usableHeight - height * zoom) / 2) - bounds.top * zoom
       }
     });
-  }, [nodes, canvasSize.width, canvasSize.height, setViewport, draftIds]);
+  }, [nodes, nodeHeights, canvasSize.width, canvasSize.height, setViewport, draftIds]);
 
   useEffect(() => {
     if (nodes.length === 0 || canvasSize.width === 0 || canvasSize.height === 0 || lastFittedKey.current === autoFitKey) return;
@@ -867,6 +871,15 @@ export function GraphCanvas({
   // The caller increments this key only when a graph should be framed.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [autoFitKey, handleFitCanvas]);
+
+  // New cards are framed before they have been measured, so frame once more with their real heights.
+  const fitRef = useRef(handleFitCanvas);
+  useEffect(() => { fitRef.current = handleFitCanvas; }, [handleFitCanvas]);
+  const hasNodes = nodes.length > 0;
+  useEffect(() => {
+    const timer = setTimeout(() => fitRef.current(), 200);
+    return () => clearTimeout(timer);
+  }, [autoFitKey, hasNodes]);
 
   // iOS Safari zooms the whole page on a pinch even with touch-action: none, fighting the map's own
   // zoom. Its non-standard gesture events are the only way to stop that.

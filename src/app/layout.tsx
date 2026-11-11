@@ -27,7 +27,7 @@ export default function RootLayout({
 
   const bodyContent = (
     <html lang="en" className={`h-full antialiased ${kalam.variable} ${caveat.variable}`}>
-      <body className="h-full w-full overflow-hidden m-0 p-0 font-sans">
+      <body className="h-full w-full overflow-hidden m-0 p-0 font-sans" suppressHydrationWarning>
         {children}
       </body>
     </html>

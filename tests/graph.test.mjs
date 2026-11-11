@@ -773,6 +773,15 @@ test('Chat Tool: Graph Organizer calculates deterministic layouts', async () => 
   assert.strictEqual(compactLayout.length, 5);
   assert.strictEqual(compactLayout[0].x, 120);
   assert.strictEqual(compactLayout[0].y, 120);
+
+  // Cards of very different heights never overlap in any layout
+  const heights = { c1: 400, c2: 180, s1: 520, cl1: 300, q1: 150 };
+  for (const strategy of ['cluster_by_type', 'hierarchical', 'compact']) {
+    const placed = computeOrganizedLayout(graph, strategy, { heights });
+    for (const a of placed) for (const b of placed) {
+      if (a.id !== b.id && a.x === b.x && a.y < b.y) assert.ok(a.y + heights[a.id] <= b.y, `${strategy}: ${a.id} overlaps ${b.id}`);
+    }
+  }
 });
 
 test('Chat Tool: Graph Analyst audits topology and recommends improvements', async () => {
@@ -1408,7 +1417,7 @@ test('chat stream: Gemini answers are streamed incrementally', async () => {
 
 const researchOutput = (overrides = {}) => ({
   summary: 'Reefs.', subquestions: [], sources: [],
-  nodes: [{ tempId: 't1', type: 'claim', title: 'Bleaching rises', content: '', rationale: '' }],
+  nodes: [{ tempId: 't1', type: 'claim', title: 'Bleaching rises', content: '', rationale: '', sourceUrls: [] }],
   relationships: [],
   ...overrides
 });
@@ -1500,15 +1509,15 @@ test('research: Gemini deep research plans, runs two grounded hops, and links ho
       assert.ok(prompt.includes('reef symbiosis mechanism'), 'hop 1 searches the planned axes');
       return grounded(researchOutput({
         subquestions: ['Can reefs adapt?'],
-        nodes: [{ tempId: 'a', type: 'concept', title: 'Symbiosis', content: '', rationale: '' }]
+        nodes: [{ tempId: 'a', type: 'concept', title: 'Symbiosis', content: '', rationale: '', sourceUrls: [] }]
       }), 'https://one.example.org/a', 'reef symbiosis');
     }
     assert.ok(prompt.includes('Can reefs adapt?'), 'hop 2 follows hop 1 subquestions');
     assert.ok(prompt.includes('a: [concept] Symbiosis'), 'hop 2 sees hop 1 cards');
     return grounded(researchOutput({
       nodes: [
-        { tempId: 'a', type: 'claim', title: 'Heat tolerance evolves', content: '', rationale: '' },
-        { tempId: 'dup', type: 'concept', title: ' symbiosis ', content: '', rationale: '' }
+        { tempId: 'a', type: 'claim', title: 'Heat tolerance evolves', content: '', rationale: '', sourceUrls: [] },
+        { tempId: 'dup', type: 'concept', title: ' symbiosis ', content: '', rationale: '', sourceUrls: [] }
       ],
       relationships: [
         { fromTempId: 'a', toTempId: 'dup', label: 'depends_on', evidence: '', confidence: 0.7 }

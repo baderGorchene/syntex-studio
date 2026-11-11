@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { researchGraph, researchGraphStream } from '@/lib/ai-service';
+import { canonicalUrl } from '@/lib/ai-research';
 import {
   getAllConnectionsFromDb,
   getAllNodesFromDb,
@@ -35,7 +36,7 @@ function buildSessionFromResearchResult(
   mode: ResearchMode,
   graph: ReturnType<typeof normalizeGraph>,
   resultPayload: {
-    result: { summary: string; subquestions: string[]; nodes: Array<{ tempId: string; type: string; title: string; content?: string; rationale?: string }>; relationships: Array<{ fromTempId: string; toTempId: string; label: string; evidence?: string; confidence?: number }> };
+    result: { summary: string; subquestions: string[]; nodes: Array<{ tempId: string; type: string; title: string; content?: string; rationale?: string; sourceUrls?: string[] }>; relationships: Array<{ fromTempId: string; toTempId: string; label: string; evidence?: string; confidence?: number }> };
     sources: Array<{ title: string; url: string }>;
     searchQueries: string[];
     provider: string;
@@ -51,19 +52,50 @@ function buildSessionFromResearchResult(
   const baseX = Math.max(200, ...Object.values(graph.nodesById).map(node => node.x + (node.width || 280))) + 120;
   const baseY = Math.min(220, ...Object.values(graph.nodesById).map(node => node.y));
 
-  for (const [index, item] of result.nodes.slice(0, MODES[mode].maxNodes).entries()) {
+  // Drafts fill three columns, each card going under the shortest one, so tall cards never overlap.
+  // ponytail: heights are estimated from text length (the server cannot measure a card) and err tall;
+  // lay drafts out on the client from measured heights if the gaps ever look uneven.
+  const columnBottoms = [0, 0, 0];
+  const place = (title: string, bodyHeight: number) => {
+    const column = columnBottoms.indexOf(Math.min(...columnBottoms));
+    const position = { x: baseX + column * 330, y: baseY + columnBottoms[column] };
+    columnBottoms[column] += bodyHeight + Math.max(1, Math.ceil(title.length / 24)) * 34 + 40;
+    return position;
+  };
+
+  // Source cards already on the map and the ones this run found, by canonical URL, so cards can cite them.
+  const sourceIdByUrl = new Map<string, string>();
+  const citableSource = (url: string | undefined, id: string) => {
+    const key = url ? canonicalUrl(url) : null;
+    if (key && !sourceIdByUrl.has(key)) sourceIdByUrl.set(key, id);
+  };
+  for (const node of Object.values(graph.nodesById)) citableSource(node.url, node.id);
+  const newSources = sources
+    .filter(source => !existingSourceUrls.has(source.url))
+    .map(source => ({ ...source, id: `research-${randomUUID()}` }));
+  for (const source of newSources) citableSource(source.url, source.id);
+  const citations: Array<{ from: string; to: string }> = [];
+
+  for (const item of result.nodes.slice(0, MODES[mode].maxNodes)) {
     if (!item || !nodeTypes.has(item.type) || typeof item.tempId !== 'string' || typeof item.title !== 'string') continue;
     const id = `research-${randomUUID()}`;
     idByTempId.set(item.tempId, id);
     const type = item.type as CanvasNode['type'];
+    const title = item.title.trim().slice(0, 500);
+    if (!title) continue;
+    const content = String(item.content || '').slice(0, 12000);
+    for (const url of (Array.isArray(item.sourceUrls) ? item.sourceUrls : []).slice(0, 4)) {
+      const key = typeof url === 'string' ? canonicalUrl(url) : null;
+      const to = key ? sourceIdByUrl.get(key) : undefined;
+      if (to && !citations.some(c => c.from === id && c.to === to)) citations.push({ from: id, to });
+    }
     const node: CanvasNode = {
       id, type,
-      x: baseX + (index % 3) * 330,
-      y: baseY + Math.floor(index / 3) * 245,
+      ...place(title, 150 + Math.min(7, Math.ceil(content.length / 38)) * 22),
       width: type === 'question' ? 300 : 280,
       color: type === 'question' ? 'terracotta' : type === 'claim' ? 'neutral' : 'cobalt',
-      title: item.title.trim().slice(0, 500),
-      content: String(item.content || '').slice(0, 12000),
+      title,
+      content,
       createdAt: Date.now(),
       metadata: {
         origin: 'ai',
@@ -71,25 +103,31 @@ function buildSessionFromResearchResult(
         rationale: String(item.rationale || '').slice(0, 2000)
       }
     };
-    if (node.title) changes.push({ id: randomUUID(), kind: 'node', payload: node, status: 'pending', rationale: node.metadata?.rationale });
+    changes.push({ id: randomUUID(), kind: 'node', payload: node, status: 'pending', rationale: node.metadata?.rationale });
   }
 
-  const sourceNodes: CanvasNode[] = sources
-    .filter(source => !existingSourceUrls.has(source.url))
-    .map((source, index) => ({
-      id: `research-${randomUUID()}`,
+  const sourceNodes: CanvasNode[] = newSources.map(source => {
+    const title = source.title.slice(0, 300);
+    const citedBy = citations.filter(c => c.to === source.id).length;
+    return {
+      id: source.id,
       type: 'source',
-      x: baseX + (index % 3) * 330,
-      y: baseY + 260 + Math.floor(index / 3) * 245,
+      ...place(title, 170),
       width: 280,
       color: 'sage',
-      title: source.title.slice(0, 300),
+      title,
       url: source.url,
       domain: (() => { try { return new URL(source.url).hostname; } catch { return ''; } })(),
       description: 'Discovered through grounded search. Review before using as evidence.',
       createdAt: Date.now(),
-      metadata: { origin: 'ai', rationale: 'Discovered during this research run; not yet linked to a claim.' }
-    }));
+      metadata: {
+        origin: 'ai',
+        rationale: citedBy
+          ? `Cited by ${citedBy} ${citedBy === 1 ? 'card' : 'cards'} from this research run.`
+          : 'Discovered during this research run; not yet linked to a claim.'
+      }
+    };
+  });
   for (const source of sourceNodes) changes.push({
     id: randomUUID(), kind: 'node', payload: source, status: 'pending', rationale: source.metadata?.rationale
   });
@@ -116,6 +154,18 @@ function buildSessionFromResearchResult(
       }
     };
     return [edge];
+  });
+  // Each card points at the sources it drew on. A citation is a pending change like any other, and is
+  // dropped on review if either end is not kept.
+  for (const { from, to } of citations) newEdges.push({
+    id: `research-edge-${randomUUID()}`,
+    from, to, label: 'references',
+    color: 'neutral',
+    arrowhead: 'end',
+    lineStyle: 'curved',
+    strokePattern: strokeForLabel('references'),
+    animated: false,
+    metadata: { origin: 'ai', evidence: 'The research run drew this card from this source.' }
   });
   for (const edge of newEdges) changes.push({
     id: randomUUID(), kind: 'relationship', payload: edge, status: 'pending', rationale: edge.metadata?.evidence
